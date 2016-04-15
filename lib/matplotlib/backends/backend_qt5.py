@@ -1,11 +1,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-import six
+from matplotlib.externals import six
 
 import os
 import re
 import signal
 import sys
+from matplotlib.externals.six import unichr
 
 import matplotlib
 
@@ -20,7 +21,6 @@ from matplotlib.backend_bases import ShowBase
 
 from matplotlib._pylab_helpers import Gcf
 from matplotlib.figure import Figure
-
 
 from matplotlib.widgets import SubplotTool
 try:
@@ -124,13 +124,13 @@ def _create_qApp():
     """
     Only one qApp can exist at a time, so check before creating one.
     """
-    if QtWidgets.QApplication.startingUp():
+    global qApp
+
+    if qApp is None:
         if DEBUG:
             print("Starting up QApplication")
-        global qApp
         app = QtWidgets.QApplication.instance()
         if app is None:
-
             # check for DISPLAY env variable on X11 build of Qt
             if hasattr(QtGui, "QX11Info"):
                 display = os.environ.get('DISPLAY')
@@ -183,6 +183,7 @@ class TimerQT(TimerBase):
         upon timer events. This list can be manipulated directly, or the
         functions add_callback and remove_callback can be used.
     '''
+
     def __init__(self, *args, **kwargs):
         TimerBase.__init__(self, *args, **kwargs)
 
@@ -233,25 +234,20 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         # NB: Using super for this call to avoid a TypeError:
         # __init__() takes exactly 2 arguments (1 given) on QWidget
         # PyQt5
+        # The need for this change is documented here
+        # http://pyqt.sourceforge.net/Docs/PyQt5/pyqt4_differences.html#cooperative-multi-inheritance
         super(FigureCanvasQT, self).__init__(figure=figure)
         self.figure = figure
         self.setMouseTracking(True)
-        self._idle = True
-        # hide until we can test and fix
-        # self.startTimer(backend_IdleEvent.milliseconds)
         w, h = self.get_width_height()
         self.resize(w, h)
 
-    def __timerEvent(self, event):
-        # hide until we can test and fix
-        self.mpl_idle_event(event)
-
     def enterEvent(self, event):
-        FigureCanvasBase.enter_notify_event(self, event)
+        FigureCanvasBase.enter_notify_event(self, guiEvent=event)
 
     def leaveEvent(self, event):
         QtWidgets.QApplication.restoreOverrideCursor()
-        FigureCanvasBase.leave_notify_event(self, event)
+        FigureCanvasBase.leave_notify_event(self, guiEvent=event)
 
     def mousePressEvent(self, event):
         x = event.pos().x()
@@ -259,7 +255,8 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         y = self.figure.bbox.height - event.pos().y()
         button = self.buttond.get(event.button())
         if button is not None:
-            FigureCanvasBase.button_press_event(self, x, y, button)
+            FigureCanvasBase.button_press_event(self, x, y, button,
+                                                guiEvent=event)
         if DEBUG:
             print('button pressed:', event.button())
 
@@ -270,7 +267,8 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         button = self.buttond.get(event.button())
         if button is not None:
             FigureCanvasBase.button_press_event(self, x, y,
-                                                button, dblclick=True)
+                                                button, dblclick=True,
+                                                guiEvent=event)
         if DEBUG:
             print('button doubleclicked:', event.button())
 
@@ -278,7 +276,7 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         x = event.x()
         # flipy so y=0 is bottom of canvas
         y = self.figure.bbox.height - event.y()
-        FigureCanvasBase.motion_notify_event(self, x, y)
+        FigureCanvasBase.motion_notify_event(self, x, y, guiEvent=event)
         # if DEBUG: print('mouse move')
 
     def mouseReleaseEvent(self, event):
@@ -287,7 +285,8 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         y = self.figure.bbox.height - event.y()
         button = self.buttond.get(event.button())
         if button is not None:
-            FigureCanvasBase.button_release_event(self, x, y, button)
+            FigureCanvasBase.button_release_event(self, x, y, button,
+                                                  guiEvent=event)
         if DEBUG:
             print('button released')
 
@@ -302,7 +301,7 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
             steps = event.pixelDelta().y()
 
         if steps != 0:
-            FigureCanvasBase.scroll_event(self, x, y, steps)
+            FigureCanvasBase.scroll_event(self, x, y, steps, guiEvent=event)
             if DEBUG:
                 print('scroll event: delta = %i, '
                       'steps = %i ' % (event.delta(), steps))
@@ -311,7 +310,7 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         key = self._get_key(event)
         if key is None:
             return
-        FigureCanvasBase.key_press_event(self, key)
+        FigureCanvasBase.key_press_event(self, key, guiEvent=event)
         if DEBUG:
             print('key press', key)
 
@@ -319,7 +318,7 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         key = self._get_key(event)
         if key is None:
             return
-        FigureCanvasBase.key_release_event(self, key)
+        FigureCanvasBase.key_release_event(self, key, guiEvent=event)
         if DEBUG:
             print('key release', key)
 
@@ -330,12 +329,11 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
             print('resize (%d x %d)' % (w, h))
             print("FigureCanvasQt.resizeEvent(%d, %d)" % (w, h))
         dpival = self.figure.dpi
-        winch = w/dpival
-        hinch = h/dpival
-        self.figure.set_size_inches(winch, hinch)
+        winch = w / dpival
+        hinch = h / dpival
+        self.figure.set_size_inches(winch, hinch, forward=False)
         FigureCanvasBase.resize_event(self)
-        self.draw()
-        self.update()
+        self.draw_idle()
         QtWidgets.QWidget.resizeEvent(self, event)
 
     def sizeHint(self):
@@ -380,7 +378,7 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
                 key = key.lower()
 
         mods.reverse()
-        return u'+'.join(mods + [key])
+        return '+'.join(mods + [key])
 
     def new_timer(self, *args, **kwargs):
         """
@@ -415,19 +413,6 @@ class FigureCanvasQT(QtWidgets.QWidget, FigureCanvasBase):
         FigureCanvasBase.stop_event_loop_default(self)
 
     stop_event_loop.__doc__ = FigureCanvasBase.stop_event_loop_default.__doc__
-
-    def draw_idle(self):
-        'update drawing area only if idle'
-        d = self._idle
-        self._idle = False
-
-        def idle_draw(*args):
-            try:
-                self.draw()
-            finally:
-                self._idle = True
-        if d:
-            QtCore.QTimer.singleShot(0, idle_draw)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -482,6 +467,10 @@ class FigureManagerQT(FigureManagerBase):
         else:
             tbs_height = 0
 
+        # add text label to status bar
+        self.statusbar_label = QtWidgets.QLabel()
+        self.window.statusBar().addWidget(self.statusbar_label)
+
         # resize the main window so it will display the canvas with the
         # requested size:
         cs = canvas.sizeHint()
@@ -494,17 +483,18 @@ class FigureManagerQT(FigureManagerBase):
 
         if matplotlib.is_interactive():
             self.window.show()
+            self.canvas.draw_idle()
 
         def notify_axes_change(fig):
             # This will be called whenever the current axes is changed
             if self.toolbar is not None:
                 self.toolbar.update()
         self.canvas.figure.add_axobserver(notify_axes_change)
+        self.window.raise_()
 
     @QtCore.Slot()
     def _show_message(self, s):
-        # Fixes a PySide segfault.
-        self.window.statusBar().showMessage(s)
+        self.statusbar_label.setText(s)
 
     def full_screen_toggle(self):
         if self.window.isFullScreen():
@@ -550,13 +540,13 @@ class FigureManagerQT(FigureManagerBase):
         self.window.destroyed.connect(self._widgetclosed)
 
         if self.toolbar:
-                self.toolbar.destroy()
+            self.toolbar.destroy()
         if DEBUG:
-                print("destroy figure manager")
+            print("destroy figure manager")
         self.window.close()
 
     def get_window_title(self):
-        return str(self.window.windowTitle())
+        return six.text_type(self.window.windowTitle())
 
     def set_window_title(self, title):
         self.window.setWindowTitle(title)
@@ -597,7 +587,7 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
         if figureoptions is not None:
             a = self.addAction(self._icon("qt4_editor_options.png"),
                                'Customize', self.edit_parameters)
-            a.setToolTip('Edit curves line and axes parameters')
+            a.setToolTip('Edit axis, curve and image parameters')
 
         self.buttons = {}
 
@@ -609,8 +599,8 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
             self.locLabel.setAlignment(
                     QtCore.Qt.AlignRight | QtCore.Qt.AlignTop)
             self.locLabel.setSizePolicy(
-                QtGui.QSizePolicy(QtGui.QSizePolicy.Expanding,
-                                  QtGui.QSizePolicy.Ignored))
+                QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                  QtWidgets.QSizePolicy.Ignored))
             labelAction = self.addWidget(self.locLabel)
             labelAction.setVisible(True)
 
@@ -620,28 +610,21 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
     if figureoptions is not None:
         def edit_parameters(self):
             allaxes = self.canvas.figure.get_axes()
+            if not allaxes:
+                QtWidgets.QMessageBox.warning(
+                    self.parent, "Error", "There are no axes to edit.")
+                return
             if len(allaxes) == 1:
                 axes = allaxes[0]
             else:
                 titles = []
                 for axes in allaxes:
-                    title = axes.get_title()
-                    ylabel = axes.get_ylabel()
-                    label = axes.get_label()
-                    if title:
-                        fmt = "%(title)s"
-                        if ylabel:
-                            fmt += ": %(ylabel)s"
-                        fmt += " (%(axes_repr)s)"
-                    elif ylabel:
-                        fmt = "%(axes_repr)s (%(ylabel)s)"
-                    elif label:
-                        fmt = "%(axes_repr)s (%(label)s)"
-                    else:
-                        fmt = "%(axes_repr)s"
-                    titles.append(fmt % dict(title=title,
-                                         ylabel=ylabel, label=label,
-                                         axes_repr=repr(axes)))
+                    name = (axes.get_title() or
+                            " - ".join(filter(None, [axes.get_xlabel(),
+                                                     axes.get_ylabel()])) or
+                            "<anonymous {} (id: {:#x})>".format(
+                                type(axes).__name__, id(axes)))
+                    titles.append(name)
                 item, ok = QtWidgets.QInputDialog.getItem(
                     self.parent, 'Customize', 'Select axes:', titles, 0, False)
                 if ok:
@@ -665,12 +648,12 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
         self._update_buttons_checked()
 
     def dynamic_update(self):
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def set_message(self, s):
         self.message.emit(s)
         if self.coordinates:
-            self.locLabel.setText(s.replace(', ', '\n'))
+            self.locLabel.setText(s)
 
     def set_cursor(self, cursor):
         if DEBUG:
@@ -687,6 +670,9 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
 
         rect = [int(val)for val in (min(x0, x1), min(y0, y1), w, h)]
         self.canvas.drawRectangle(rect)
+
+    def remove_rubberband(self):
+        self.canvas.drawRectangle(None)
 
     def configure_subplots(self):
         image = os.path.join(matplotlib.rcParams['datapath'],
@@ -714,7 +700,8 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
             filters.append(filter)
         filters = ';;'.join(filters)
 
-        fname = _getSaveFileName(self.parent, "Choose a filename to save to",
+        fname, filter = _getSaveFileName(self.parent,
+                                         "Choose a filename to save to",
                                  start, filters, selectedFilter)
         if fname:
             if startpath == '':
@@ -728,7 +715,7 @@ class NavigationToolbar2QT(NavigationToolbar2, QtWidgets.QToolBar):
                 self.canvas.print_figure(six.text_type(fname))
             except Exception as e:
                 QtWidgets.QMessageBox.critical(
-                    self, "Error saving file", str(e),
+                    self, "Error saving file", six.text_type(e),
                     QtWidgets.QMessageBox.Ok, QtWidgets.QMessageBox.NoButton)
 
 
@@ -749,7 +736,7 @@ class SubplotToolQt(SubplotTool, UiSubplotTool):
         self.slidertop.valueChanged.connect(self.sliderbottom.setMaximum)
 
         self.defaults = {}
-        for attr in ('left', 'bottom', 'right', 'top', 'wspace', 'hspace',):
+        for attr in ('left', 'bottom', 'right', 'top', 'wspace', 'hspace', ):
             self.defaults[attr] = getattr(self.targetfig.subplotpars, attr)
             slider = getattr(self, 'slider' + attr)
             slider.setMinimum(0)
@@ -760,7 +747,7 @@ class SubplotToolQt(SubplotTool, UiSubplotTool):
         self._setSliderPositions()
 
     def _setSliderPositions(self):
-        for attr in ('left', 'bottom', 'right', 'top', 'wspace', 'hspace',):
+        for attr in ('left', 'bottom', 'right', 'top', 'wspace', 'hspace', ):
             slider = getattr(self, 'slider' + attr)
             slider.setSliderPosition(int(self.defaults[attr] * 1000))
 
@@ -844,11 +831,10 @@ def exception_handler(type, value, tb):
     if hasattr(value, 'strerror') and value.strerror is not None:
         msg += value.strerror
     else:
-        msg += str(value)
+        msg += six.text_type(value)
 
     if len(msg):
         error_msg_qt(msg)
-
 
 FigureCanvas = FigureCanvasQT
 FigureManager = FigureManagerQT

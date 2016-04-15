@@ -35,16 +35,21 @@ TICKLEFT                       tickleft
 TICKRIGHT                      tickright
 TICKUP                         tickup
 TICKDOWN                       tickdown
-CARETLEFT                      caretleft
-CARETRIGHT                     caretright
-CARETUP                        caretup
-CARETDOWN                      caretdown
+CARETLEFT                      caretleft (centered at tip)
+CARETRIGHT                     caretright (centered at tip)
+CARETUP                        caretup (centered at tip)
+CARETDOWN                      caretdown (centered at tip)
+CARETLEFTBASE                  caretleft (centered at base)
+CARETRIGHTBASE                 caretright (centered at base)
+CARETUPBASE                    caretup (centered at base)
 "None"                         nothing
 None                           nothing
 " "                            nothing
 ""                             nothing
 ``'$...$'``                    render the string using mathtext.
 `verts`                        a list of (x, y) pairs used for Path vertices.
+                               The center of the marker is located at (0,0) and
+                               the size is normalized.
 path                           a `~matplotlib.path.Path` instance.
 (`numsides`, `style`, `angle`) see below
 ============================== ===============================================
@@ -77,8 +82,8 @@ that define the shape.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import xrange
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import xrange
 
 import numpy as np
 
@@ -89,7 +94,10 @@ from .transforms import IdentityTransform, Affine2D
 
 # special-purpose marker identifiers:
 (TICKLEFT, TICKRIGHT, TICKUP, TICKDOWN,
- CARETLEFT, CARETRIGHT, CARETUP, CARETDOWN) = list(xrange(8))
+ CARETLEFT, CARETRIGHT, CARETUP, CARETDOWN,
+ CARETLEFTBASE, CARETRIGHTBASE, CARETUPBASE, CARETDOWNBASE) = list(xrange(12))
+
+_empty_path = Path(np.empty((0, 2)))
 
 
 class MarkerStyle(object):
@@ -126,6 +134,10 @@ class MarkerStyle(object):
         CARETRIGHT: 'caretright',
         CARETUP: 'caretup',
         CARETDOWN: 'caretdown',
+        CARETLEFTBASE: 'caretleftbase',
+        CARETRIGHTBASE: 'caretrightbase',
+        CARETUPBASE: 'caretupbase',
+        CARETDOWNBASE: 'caretdownbase',
         "None": 'nothing',
         None: 'nothing',
         ' ': 'nothing',
@@ -143,7 +155,7 @@ class MarkerStyle(object):
     # TODO: Is this ever used as a non-constant?
     _point_size_reduction = 0.5
 
-    def __init__(self, marker=None, fillstyle='full'):
+    def __init__(self, marker=None, fillstyle=None):
         """
         MarkerStyle
 
@@ -163,6 +175,8 @@ class MarkerStyle(object):
         fillstyle : string, optional, default: 'full'
             'full', 'left", 'right', 'bottom', 'top', 'none'
         """
+        # The fillstyle has to be set here as it might be accessed by calls to
+        # _recache() in set_marker.
         self._fillstyle = fillstyle
         self.set_marker(marker)
         self.set_fillstyle(fillstyle)
@@ -178,7 +192,7 @@ class MarkerStyle(object):
         self._recache()
 
     def _recache(self):
-        self._path = Path(np.empty((0, 2)))
+        self._path = _empty_path
         self._transform = IdentityTransform()
         self._alt_path = None
         self._alt_transform = None
@@ -209,6 +223,8 @@ class MarkerStyle(object):
         ----------
         fillstyle : string amongst known fillstyles
         """
+        if fillstyle is None:
+            fillstyle = rcParams['markers.fillstyle']
         if fillstyle not in self.fillstyles:
             raise ValueError("Unrecognized fillstyle %s"
                              % ' '.join(self.fillstyles))
@@ -242,7 +258,8 @@ class MarkerStyle(object):
                 Path(marker)
                 self._marker_function = self._set_vertices
             except ValueError:
-                raise ValueError('Unrecognized marker style {}'.format(marker))
+                raise ValueError('Unrecognized marker style'
+                                 ' {0}'.format(marker))
 
         self._marker = marker
         self._recache()
@@ -269,7 +286,7 @@ class MarkerStyle(object):
         verts = path.vertices
         rescale = max(np.max(np.abs(verts[:, 0])),
                       np.max(np.abs(verts[:, 1])))
-        self._transform = Affine2D().scale(1.0 / rescale)
+        self._transform = Affine2D().scale(0.5 / rescale)
         self._path = path
 
     def _set_path_marker(self):
@@ -343,7 +360,7 @@ class MarkerStyle(object):
 
     def _set_circle(self, reduction=1.0):
         self._transform = Affine2D().scale(0.5 * reduction)
-        self._snap_threshold = 6.0
+        self._snap_threshold = np.inf
         fs = self.get_fillstyle()
         if not self._half_fill():
             self._path = Path.unit_circle()
@@ -770,6 +787,36 @@ class MarkerStyle(object):
         self._snap_threshold = 3.0
         self._filled = False
         self._path = self._caret_path
+        self._joinstyle = 'miter'
+
+    _caret_path_base = Path([[-1.0, 0.0], [0.0, -1.5], [1.0, 0]])
+
+    def _set_caretdownbase(self):
+        self._transform = Affine2D().scale(0.5)
+        self._snap_threshold = 3.0
+        self._filled = False
+        self._path = self._caret_path_base
+        self._joinstyle = 'miter'
+
+    def _set_caretupbase(self):
+        self._transform = Affine2D().scale(0.5).rotate_deg(180)
+        self._snap_threshold = 3.0
+        self._filled = False
+        self._path = self._caret_path_base
+        self._joinstyle = 'miter'
+
+    def _set_caretleftbase(self):
+        self._transform = Affine2D().scale(0.5).rotate_deg(270)
+        self._snap_threshold = 3.0
+        self._filled = False
+        self._path = self._caret_path_base
+        self._joinstyle = 'miter'
+
+    def _set_caretrightbase(self):
+        self._transform = Affine2D().scale(0.5).rotate_deg(90)
+        self._snap_threshold = 3.0
+        self._filled = False
+        self._path = self._caret_path_base
         self._joinstyle = 'miter'
 
     _x_path = Path([[-1.0, -1.0], [1.0, 1.0],

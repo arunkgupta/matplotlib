@@ -4,10 +4,12 @@ setup.cfg.template for more information.
 """
 
 from __future__ import print_function, absolute_import
-
+from string import Template
 # This needs to be the very first thing to use distribute
 from distribute_setup import use_setuptools
 use_setuptools()
+from setuptools.command.test import test as TestCommand
+from setuptools.command.build_ext import build_ext as BuildExtCommand
 
 import sys
 
@@ -51,8 +53,9 @@ from distutils.dist import Distribution
 import setupext
 from setupext import print_line, print_raw, print_message, print_status
 
-# Get the version from the source code
-__version__ = setupext.Matplotlib().check()
+# Get the version from versioneer
+import versioneer
+__version__ = versioneer.get_version()
 
 
 # These are the packages in the order we want to display them.  This
@@ -64,11 +67,12 @@ mpl_packages = [
     setupext.Platform(),
     'Required dependencies and extensions',
     setupext.Numpy(),
-    setupext.Six(),
     setupext.Dateutil(),
+    setupext.FuncTools32(),
+    setupext.Pytz(),
+    setupext.Cycler(),
     setupext.Tornado(),
     setupext.Pyparsing(),
-    setupext.CXX(),
     setupext.LibAgg(),
     setupext.FreeType(),
     setupext.FT2Font(),
@@ -77,14 +81,17 @@ mpl_packages = [
     setupext.Image(),
     setupext.TTConv(),
     setupext.Path(),
+    setupext.ContourLegacy(),
     setupext.Contour(),
     setupext.Delaunay(),
     setupext.QhullWrap(),
     setupext.Tri(),
+    setupext.Externals(),
     'Optional subpackages',
     setupext.SampleData(),
     setupext.Toolkits(),
     setupext.Tests(),
+    setupext.Toolkits_Tests(),
     'Optional backend extensions',
     # These backends are listed in order of preference, the first
     # being the most preferred.  The first one that looks like it will
@@ -92,7 +99,6 @@ mpl_packages = [
     setupext.BackendMacOSX(),
     setupext.BackendQt5(),
     setupext.BackendQt4(),
-    setupext.BackendPySide(),
     setupext.BackendGtk3Agg(),
     setupext.BackendGtk3Cairo(),
     setupext.BackendGtkAgg(),
@@ -106,7 +112,9 @@ mpl_packages = [
     setupext.DviPng(),
     setupext.Ghostscript(),
     setupext.LaTeX(),
-    setupext.PdfToPs()
+    setupext.PdfToPs(),
+    'Optional package data',
+    setupext.Dlls(),
     ]
 
 
@@ -115,10 +123,46 @@ classifiers = [
     'Intended Audience :: Science/Research',
     'License :: OSI Approved :: Python Software Foundation License',
     'Programming Language :: Python',
-    'Programming Language :: Python :: 2',
+    'Programming Language :: Python :: 2.7',
     'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.3',
+    'Programming Language :: Python :: 3.4',
+    'Programming Language :: Python :: 3.5',
     'Topic :: Scientific/Engineering :: Visualization',
     ]
+
+
+class NoopTestCommand(TestCommand):
+    def run(self):
+        print("Matplotlib does not support running tests with "
+              "'python setup.py test'. Please run 'python tests.py'")
+
+
+class BuildExtraLibraries(BuildExtCommand):
+    def run(self):
+        for package in good_packages:
+            package.do_custom_build()
+
+        return BuildExtCommand.run(self)
+
+
+cmdclass = versioneer.get_cmdclass()
+cmdclass['test'] = NoopTestCommand
+cmdclass['build_ext'] = BuildExtraLibraries
+
+
+# patch bdist_wheel for a bug on windows
+# https://bitbucket.org/pypa/wheel/issues/91/cannot-create-a-file-when-that-file
+if os.name == 'nt':
+    try:
+        from wheel.bdist_wheel import bdist_wheel
+    except ImportError:
+        # No wheel installed, so we also can't run that command...
+        pass
+    else:
+        # patched_bdist_wheel has a run() method, which works on windows
+        from patched_bdist_wheel import patched_bdist_wheel
+        cmdclass['bdist_wheel'] = patched_bdist_wheel
 
 # One doesn't normally see `if __name__ == '__main__'` blocks in a setup.py,
 # however, this is needed on Windows to avoid creating infinite subprocesses
@@ -135,7 +179,6 @@ if __name__ == '__main__':
     install_requires = []
     setup_requires = []
     default_backend = None
-
 
     # Go through all of the packages and figure out which ones we are
     # going to build/install.
@@ -169,7 +212,6 @@ if __name__ == '__main__':
                         default_backend = package.name
     print_raw('')
 
-
     # Abort if any of the required packages can not be built.
     if required_failed:
         print_line()
@@ -179,12 +221,9 @@ if __name__ == '__main__':
             ', '.join(x.name for x in required_failed))
         sys.exit(1)
 
-
     # Now collect all of the information we need to build all of the
     # packages.
     for package in good_packages:
-        if isinstance(package, str):
-            continue
         packages.extend(package.get_packages())
         namespace_packages.extend(package.get_namespace_packages())
         py_modules.extend(package.get_py_modules())
@@ -205,9 +244,9 @@ if __name__ == '__main__':
         default_backend = setupext.options['backend']
     with open('matplotlibrc.template') as fd:
         template = fd.read()
+    template = Template(template)
     with open('lib/matplotlib/mpl-data/matplotlibrc', 'w') as fd:
-        fd.write(template % {'backend': default_backend})
-
+        fd.write(template.safe_substitute(TEMPLATE_BACKEND=default_backend))
 
     # Build in verbose mode if requested
     if setupext.options['verbose']:
@@ -234,7 +273,7 @@ if __name__ == '__main__':
         version=__version__,
         description="Python plotting package",
         author="John D. Hunter, Michael Droettboom",
-        author_email="mdroe@stsci.edu",
+        author_email="matplotlib-users@python.org",
         url="http://matplotlib.org",
         long_description="""
         matplotlib strives to produce publication quality 2D graphics
@@ -245,14 +284,14 @@ if __name__ == '__main__':
         """,
         license="BSD",
         packages=packages,
-        namespace_packages = namespace_packages,
+        namespace_packages=namespace_packages,
         platforms='any',
         py_modules=py_modules,
         ext_modules=ext_modules,
         package_dir=package_dir,
         package_data=package_data,
         classifiers=classifiers,
-        download_url="https://downloads.sourceforge.net/project/matplotlib/matplotlib/matplotlib-{0}/matplotlib-{0}.tar.gz".format(__version__),
+        download_url="http://matplotlib.org/users/installing.html",
 
         # List third-party Python packages that we require
         install_requires=install_requires,
@@ -262,6 +301,6 @@ if __name__ == '__main__':
         # Telling setuptools this prevents it from doing an automatic
         # check for zip safety.
         zip_safe=False,
-
+        cmdclass=cmdclass,
         **extra_args
     )

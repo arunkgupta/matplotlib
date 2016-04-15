@@ -1,15 +1,19 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import map
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import map
 
 import datetime
 import warnings
 import tempfile
 
 import dateutil
-import mock
+try:
+    # mock in python 3.3+
+    from unittest import mock
+except ImportError:
+    import mock
 from nose.tools import assert_raises, assert_equal
 
 from matplotlib.testing.decorators import image_comparison, cleanup
@@ -67,7 +71,7 @@ def test_date_axhline():
     fig.subplots_adjust(left=0.25)
 
 
-@image_comparison(baseline_images=['date_axvline'], tol=16,
+@image_comparison(baseline_images=['date_axvline'],
                   extensions=['png'])
 def test_date_axvline():
     # test ax hline with date inputs
@@ -155,12 +159,61 @@ def test_DateFormatter():
     fig.autofmt_xdate()
 
 
+def test_date_formatter_strftime():
+    """
+    Tests that DateFormatter matches datetime.strftime,
+    check microseconds for years before 1900 for bug #3179
+    as well as a few related issues for years before 1900.
+    """
+    def test_strftime_fields(dt):
+        """For datetime object dt, check DateFormatter fields"""
+        # Note: the last couple of %%s are to check multiple %s are handled
+        # properly; %% should get replaced by %.
+        formatter = mdates.DateFormatter("%w %d %m %y %Y %H %I %M %S %%%f %%x")
+        # Compute date fields without using datetime.strftime,
+        # since datetime.strftime does not work before year 1900
+        formatted_date_str = (
+            "{weekday} {day:02d} {month:02d} {year:02d} {full_year:04d} "
+            "{hour24:02d} {hour12:02d} {minute:02d} {second:02d} "
+            "%{microsecond:06d} %x"
+            .format(
+            # weeknum=dt.isocalendar()[1],  # %U/%W {weeknum:02d}
+            # %w Sunday=0, weekday() Monday=0
+            weekday=str((dt.weekday() + 1) % 7),
+            day=dt.day,
+            month=dt.month,
+            year=dt.year % 100,
+            full_year=dt.year,
+            hour24=dt.hour,
+            hour12=((dt.hour-1) % 12) + 1,
+            minute=dt.minute,
+            second=dt.second,
+            microsecond=dt.microsecond))
+        assert_equal(formatter.strftime(dt), formatted_date_str)
+
+        try:
+            # Test strftime("%x") with the current locale.
+            import locale  # Might not exist on some platforms, such as Windows
+            locale_formatter = mdates.DateFormatter("%x")
+            locale_d_fmt = locale.nl_langinfo(locale.D_FMT)
+            expanded_formatter = mdates.DateFormatter(locale_d_fmt)
+            assert_equal(locale_formatter.strftime(dt),
+                         expanded_formatter.strftime(dt))
+        except (ImportError, AttributeError):
+            pass
+
+    for year in range(1, 3000, 71):
+        # Iterate through random set of years
+        test_strftime_fields(datetime.datetime(year, 1, 1))
+        test_strftime_fields(datetime.datetime(year, 2, 3, 4, 5, 6, 12345))
+
+
 def test_date_formatter_callable():
     scale = -11
     locator = mock.Mock(_get_unit=mock.Mock(return_value=scale))
-    callable_formatting_function = lambda dates, _: \
-                        [dt.strftime('%d-%m//%Y') for dt in dates]
-    
+    callable_formatting_function = (lambda dates, _:
+                                    [dt.strftime('%d-%m//%Y') for dt in dates])
+
     formatter = mdates.AutoDateFormatter(locator)
     formatter.scaled[-10] = callable_formatting_function
     assert_equal(formatter([datetime.datetime(2014, 12, 25)]),
@@ -219,7 +272,8 @@ def test_auto_date_locator():
     def _create_auto_date_locator(date1, date2):
         locator = mdates.AutoDateLocator()
         locator.create_dummy_axis()
-        locator.set_view_interval(mdates.date2num(date1), mdates.date2num(date2))
+        locator.set_view_interval(mdates.date2num(date1),
+                                  mdates.date2num(date2))
         return locator
 
     d1 = datetime.datetime(1990, 1, 1)
@@ -238,11 +292,11 @@ def test_auto_date_locator():
                  '1990-09-01 00:00:00+00:00', '1990-10-01 00:00:00+00:00',
                  '1990-11-01 00:00:00+00:00', '1990-12-01 00:00:00+00:00']
                 ],
-               [datetime.timedelta(days=140),
-                ['1990-01-06 00:00:00+00:00', '1990-01-27 00:00:00+00:00',
-                 '1990-02-17 00:00:00+00:00', '1990-03-10 00:00:00+00:00',
-                 '1990-03-31 00:00:00+00:00', '1990-04-21 00:00:00+00:00',
-                 '1990-05-12 00:00:00+00:00']
+               [datetime.timedelta(days=141),
+                ['1990-01-05 00:00:00+00:00', '1990-01-26 00:00:00+00:00',
+                 '1990-02-16 00:00:00+00:00', '1990-03-09 00:00:00+00:00',
+                 '1990-03-30 00:00:00+00:00', '1990-04-20 00:00:00+00:00',
+                 '1990-05-11 00:00:00+00:00']
                 ],
                [datetime.timedelta(days=40),
                 ['1990-01-03 00:00:00+00:00', '1990-01-10 00:00:00+00:00',
@@ -271,8 +325,10 @@ def test_auto_date_locator():
                  '1990-01-01 00:00:40+00:00']
                 ],
                [datetime.timedelta(microseconds=1500),
-                ['1989-12-31 23:59:59.999507+00:00', '1990-01-01 00:00:00+00:00',
-                 '1990-01-01 00:00:00.000502+00:00', '1990-01-01 00:00:00.001005+00:00',
+                ['1989-12-31 23:59:59.999507+00:00',
+                 '1990-01-01 00:00:00+00:00',
+                 '1990-01-01 00:00:00.000502+00:00',
+                 '1990-01-01 00:00:00.001005+00:00',
                  '1990-01-01 00:00:00.001508+00:00']
                 ],
                )
@@ -282,6 +338,21 @@ def test_auto_date_locator():
         locator = _create_auto_date_locator(d1, d2)
         assert_equal(list(map(str, mdates.num2date(locator()))),
                      expected)
+
+
+@image_comparison(baseline_images=['date_inverted_limit'],
+                  extensions=['png'])
+def test_date_inverted_limit():
+    # test ax hline with date inputs
+    t0 = datetime.datetime(2009, 1, 20)
+    tf = datetime.datetime(2009, 1, 31)
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.axhline(t0, color="blue", lw=3)
+    ax.set_ylim(t0 - datetime.timedelta(days=5),
+                tf + datetime.timedelta(days=5))
+    ax.invert_yaxis()
+    fig.subplots_adjust(left=0.25)
 
 
 if __name__ == '__main__':

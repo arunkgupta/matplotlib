@@ -252,9 +252,9 @@ Mathtext_examples
 
 Below is a sampling of the many TeX expressions now supported by matplotlib's
 internal mathtext engine.  The mathtext module provides TeX style mathematical
-expressions using `freetype2 <http://freetype.sourceforge.net/index2.html>`_
-and the BaKoMa computer modern or `STIX <http://www.stixfonts.org>`_ fonts.
-See the :mod:`matplotlib.mathtext` module for additional details.
+expressions using `FreeType <http://www.freetype.org/>`_
+and the DejaVu, BaKoMa computer modern, or `STIX <http://www.stixfonts.org>`_
+fonts.  See the :mod:`matplotlib.mathtext` module for additional details.
 
 .. plot:: mpl_examples/pylab_examples/mathtext_examples.py
 
@@ -279,10 +279,9 @@ rendering of strings with the *usetex* option.
 EEG demo
 =========
 
-You can embed matplotlib into pygtk, wx, Tk, FLTK, or Qt
-applications.  Here is a screenshot of an EEG viewer called pbrain,
-which is part of the NeuroImaging in Python suite
-`NIPY <http://nipy.sourceforge.net/nipy/stable/index.html>`_.
+You can embed matplotlib into pygtk, wx, Tk, FLTK, or Qt applications.
+Here is a screenshot of an EEG viewer called `pbrain
+<http://github.com/nipy/pbrain>`__.
 
 .. image:: ../_static/eeg_small.png
 
@@ -294,7 +293,7 @@ For examples of how to embed matplotlib in different toolkits, see:
    * :ref:`user_interfaces-embedding_in_gtk2`
    * :ref:`user_interfaces-embedding_in_wx2`
    * :ref:`user_interfaces-mpl_with_glade`
-   * :ref:`user_interfaces-embedding_in_qt`
+   * :ref:`user_interfaces-embedding_in_qt4`
    * :ref:`user_interfaces-embedding_in_tk`
 
 XKCD-style sketch plots

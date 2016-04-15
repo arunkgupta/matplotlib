@@ -22,8 +22,7 @@ found.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import cPickle as pickle
+from matplotlib.externals import six
 
 """
 KNOWN ISSUES
@@ -47,11 +46,13 @@ License   : matplotlib license (PSF compatible)
             see license/LICENSE_TTFQUERY.
 """
 
+import json
 import os, sys, warnings
 try:
     set
 except NameError:
     from sets import Set as set
+from collections import Iterable
 import matplotlib
 from matplotlib import afm
 from matplotlib import ft2font
@@ -61,6 +62,12 @@ import matplotlib.cbook as cbook
 from matplotlib.compat import subprocess
 from matplotlib.fontconfig_pattern import \
     parse_fontconfig_pattern, generate_fontconfig_pattern
+
+try:
+    from functools import lru_cache
+except ImportError:
+    from functools32 import lru_cache
+
 
 USE_FONTCONFIG = False
 verbose = matplotlib.verbose
@@ -142,7 +149,7 @@ OSXFontDirectories = [
     ""
 ]
 
-if not USE_FONTCONFIG:
+if not USE_FONTCONFIG and sys.platform != 'win32':
     home = os.environ.get('HOME')
     if home is not None:
         # user fonts on OSX
@@ -179,7 +186,7 @@ def win32FontDirectory():
     If the key is not found, $WINDIR/Fonts will be returned.
     """
     try:
-        from six.moves import winreg
+        from matplotlib.externals.six.moves import winreg
     except ImportError:
         pass # Fall through to default
     else:
@@ -204,7 +211,7 @@ def win32InstalledFonts(directory=None, fontext='ttf'):
     'afm'.
     """
 
-    from six.moves import winreg
+    from matplotlib.externals.six.moves import winreg
     if directory is None:
         directory = win32FontDirectory()
 
@@ -269,6 +276,7 @@ def get_fontconfig_fonts(fontext='ttf'):
 
     fontfiles = {}
     try:
+        warnings.warn('Matplotlib is building the font cache using fc-list. This may take a moment.')
         pipe = subprocess.Popen(['fc-list', '--format=%{file}\\n'],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
@@ -586,7 +594,7 @@ def createFontList(fontfiles, fontext='ttf'):
                 continue
             try:
                 prop = ttfFontProperty(font)
-            except KeyError:
+            except (KeyError, RuntimeError):
                 continue
 
         fontlist.append(prop)
@@ -707,6 +715,12 @@ class FontProperties(object):
              self.get_file())
         return hash(l)
 
+    def __eq__(self, other):
+        return hash(self) == hash(other)
+
+    def __ne__(self, other):
+        return hash(self) != hash(other)
+
     def __str__(self):
         return self.get_fontconfig_pattern()
 
@@ -726,7 +740,7 @@ class FontProperties(object):
         Return the name of the font that best matches the font
         properties.
         """
-        return ft2font.FT2Font(findfont(self)).family_name
+        return get_font(findfont(self)).family_name
 
     def get_style(self):
         """
@@ -816,7 +830,9 @@ class FontProperties(object):
         if family is None:
             family = rcParams['font.family']
         if is_string_like(family):
-            family = [family]
+            family = [six.text_type(family)]
+        elif (not is_string_like(family) and isinstance(family, Iterable)):
+            family = [six.text_type(f) for f in family]
         self._family = family
     set_name = set_family
 
@@ -858,6 +874,7 @@ class FontProperties(object):
         except ValueError:
             if weight not in weight_dict:
                 raise ValueError("weight is invalid")
+            weight = weight_dict[weight]
         self._weight = weight
 
     def set_stretch(self, stretch):
@@ -890,7 +907,9 @@ class FontProperties(object):
             size = float(size)
         except ValueError:
             if size is not None and size not in font_scalings:
-                raise ValueError("size is invalid")
+                raise ValueError(
+                    "Size is invalid. Valid font size are " + ", ".join(
+                        str(i) for i in font_scalings.keys()))
         self._size = size
 
     def set_file(self, file):
@@ -935,23 +954,43 @@ def ttfdict_to_fnames(d):
                             fnames.append(fname)
     return fnames
 
-def pickle_dump(data, filename):
-    """
-    Equivalent to pickle.dump(data, open(filename, 'w'))
-    but closes the file to prevent filehandle leakage.
-    """
-    with open(filename, 'wb') as fh:
-        pickle.dump(data, fh)
+class JSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, FontManager):
+            return dict(o.__dict__, _class='FontManager')
+        elif isinstance(o, FontEntry):
+            return dict(o.__dict__, _class='FontEntry')
+        else:
+            return super(JSONEncoder, self).default(o)
 
-def pickle_load(filename):
-    """
-    Equivalent to pickle.load(open(filename, 'r'))
-    but closes the file to prevent filehandle leakage.
-    """
-    with open(filename, 'rb') as fh:
-        data = pickle.load(fh)
-    return data
+def _json_decode(o):
+    cls = o.pop('_class', None)
+    if cls is None:
+        return o
+    elif cls == 'FontManager':
+        r = FontManager.__new__(FontManager)
+        r.__dict__.update(o)
+        return r
+    elif cls == 'FontEntry':
+        r = FontEntry.__new__(FontEntry)
+        r.__dict__.update(o)
+        return r
+    else:
+        raise ValueError("don't know how to deserialize _class=%s" % cls)
 
+def json_dump(data, filename):
+    """Dumps a data structure as JSON in the named file.
+    Handles FontManager and its fields."""
+
+    with open(filename, 'w') as fh:
+        json.dump(data, fh, cls=JSONEncoder, indent=2)
+
+def json_load(filename):
+    """Loads a data structure as JSON from the named file.
+    Handles FontManager and its fields."""
+
+    with open(filename, 'r') as fh:
+        return json.load(fh, object_hook=_json_decode)
 
 class TempCache(object):
     """
@@ -1002,7 +1041,7 @@ class FontManager(object):
     # Increment this version number whenever the font cache data
     # format or behavior has changed and requires a existing font
     # cache files to be rebuilt.
-    __version__ = 101
+    __version__ = 200
 
     def __init__(self, size=None, weight='normal'):
         self._version = self.__version__
@@ -1030,13 +1069,13 @@ class FontManager(object):
 
         self.ttffiles = findSystemFonts(paths) + findSystemFonts()
         self.defaultFamily = {
-            'ttf': 'Bitstream Vera Sans',
+            'ttf': 'DejaVu Sans',
             'afm': 'Helvetica'}
         self.defaultFont = {}
 
         for fname in self.ttffiles:
             verbose.report('trying fontname %s' % fname, 'debug')
-            if fname.lower().find('vera.ttf')>=0:
+            if fname.lower().find('DejaVuSans.ttf')>=0:
                 self.defaultFont['ttf'] = fname
                 break
         else:
@@ -1087,15 +1126,18 @@ class FontManager(object):
         Returns a match score between the list of font families in
         *families* and the font family name *family2*.
 
-        An exact match anywhere in the list returns 0.0.
+        An exact match at the head of the list returns 0.0.
 
-        A match by generic font name will return 0.1.
+        A match further down the list will return between 0 and 1.
 
         No match will return 1.0.
         """
         if not isinstance(families, (list, tuple)):
             families = [families]
+        elif len(families) == 0:
+            return 1.0
         family2 = family2.lower()
+        step = 1 / len(families)
         for i, family1 in enumerate(families):
             family1 = family1.lower()
             if family1 in font_family_aliases:
@@ -1105,12 +1147,11 @@ class FontManager(object):
                 options = [x.lower() for x in options]
                 if family2 in options:
                     idx = options.index(family2)
-                    return ((0.1 * (idx / len(options))) *
-                            ((i + 1) / len(families)))
+                    return (i + (idx / len(options))) * step
             elif family1 == family2:
                 # The score should be weighted by where in the
                 # list the font was found.
-                return i / len(families)
+                return i * step
         return 1.0
 
     def score_style(self, style1, style2):
@@ -1211,7 +1252,7 @@ class FontManager(object):
         font is given a similarity score to the target font
         properties.  The first font with the highest score is
         returned.  If no matches below a certain threshold are found,
-        the default font (usually Vera Sans) is returned.
+        the default font (usually DejaVu Sans) is returned.
 
         `directory`, is specified, will only return fonts from the
         given directory (or subdirectory of that directory).
@@ -1220,7 +1261,7 @@ class FontManager(object):
         perform the O(n) nearest neighbor search.
 
         If `fallback_to_default` is True, will fallback to the default
-        font family (usually "Bitstream Vera Sans" or "Helvetica") if
+        font family (usually "DejaVu Sans" or "Helvetica") if
         the first lookup hard-fails.
 
         See the `W3C Cascading Style Sheet, Level 1
@@ -1276,7 +1317,7 @@ class FontManager(object):
                 return self.findfont(default_prop, fontext, directory, False)
             else:
                 # This is a hard fail -- we can't find anything reasonable,
-                # so just return the vera.ttf
+                # so just return the DejuVuSans.ttf
                 warnings.warn(
                     'findfont: Could not match %s. Returning %s' %
                     (prop, self.defaultFont[fontext]),
@@ -1302,7 +1343,6 @@ class FontManager(object):
             _lookup_cache[fontext].set(prop, result)
         return result
 
-
 _is_opentype_cff_font_cache = {}
 def is_opentype_cff_font(filename):
     """
@@ -1322,6 +1362,10 @@ def is_opentype_cff_font(filename):
 
 fontManager = None
 _fmcache = None
+
+
+get_font = lru_cache(64)(ft2font.FT2Font)
+
 
 # The experimental fontconfig-based backend.
 if USE_FONTCONFIG and sys.platform != 'win32':
@@ -1371,13 +1415,9 @@ if USE_FONTCONFIG and sys.platform != 'win32':
 else:
     _fmcache = None
 
-    if not 'TRAVIS' in os.environ:
-        cachedir = get_cachedir()
-        if cachedir is not None:
-            if six.PY3:
-                _fmcache = os.path.join(cachedir, 'fontList.py3k.cache')
-            else:
-                _fmcache = os.path.join(cachedir, 'fontList.cache')
+    cachedir = get_cachedir()
+    if cachedir is not None:
+        _fmcache = os.path.join(cachedir, 'fontList.json')
 
     fontManager = None
 
@@ -1388,14 +1428,18 @@ else:
 
     def _rebuild():
         global fontManager
+
         fontManager = FontManager()
+
         if _fmcache:
-            pickle_dump(fontManager, _fmcache)
+            with cbook.Locked(cachedir):
+                json_dump(fontManager, _fmcache)
+
         verbose.report("generated new fontManager")
 
     if _fmcache:
         try:
-            fontManager = pickle_load(_fmcache)
+            fontManager = json_load(_fmcache)
             if (not hasattr(fontManager, '_version') or
                 fontManager._version != FontManager.__version__):
                 _rebuild()

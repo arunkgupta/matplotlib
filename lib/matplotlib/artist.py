@@ -1,19 +1,23 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
+from collections import OrderedDict
 
 import re
 import warnings
 import inspect
+import numpy as np
 import matplotlib
 import matplotlib.cbook as cbook
+from matplotlib.cbook import mplDeprecation
 from matplotlib import docstring, rcParams
-from .transforms import Bbox, IdentityTransform, TransformedBbox, \
-                       TransformedPath, Transform
+from .transforms import (Bbox, IdentityTransform, TransformedBbox,
+                         TransformedPatchPath, TransformedPath, Transform)
 from .path import Path
-
-## Note, matplotlib artists use the doc strings for set and get
+from functools import wraps
+from contextlib import contextmanager
+# Note, matplotlib artists use the doc strings for set and get
 # methods to enable the introspection methods of setp and getp.  Every
 # set_* method should have a docstring containing the line
 #
@@ -27,7 +31,8 @@ from .path import Path
 # python trick.  The answer is that I need to be able to manipulate
 # the docstring, and there is no clever way to do that in python 2.2,
 # as far as I can see - see
-# http://groups.google.com/groups?hl=en&lr=&threadm=mailman.5090.1098044946.5135.python-list%40python.org&rnum=1&prev=/groups%3Fq%3D__doc__%2Bauthor%253Ajdhunter%2540ace.bsd.uchicago.edu%26hl%3Den%26btnG%3DGoogle%2BSearch
+#
+# https://mail.python.org/pipermail/python-list/2004-October/242925.html
 
 
 def allow_rasterization(draw):
@@ -38,33 +43,37 @@ def allow_rasterization(draw):
     other setup function calls, such as starting and flushing a mixed-mode
     renderer.
     """
-    def before(artist, renderer):
+    @contextmanager
+    def with_rasterized(artist, renderer):
+
         if artist.get_rasterized():
             renderer.start_rasterizing()
 
         if artist.get_agg_filter() is not None:
             renderer.start_filter()
 
-    def after(artist, renderer):
+        try:
+            yield
+        finally:
+            if artist.get_agg_filter() is not None:
+                renderer.stop_filter(artist.get_agg_filter())
 
-        if artist.get_agg_filter() is not None:
-            renderer.stop_filter(artist.get_agg_filter())
-
-        if artist.get_rasterized():
-            renderer.stop_rasterizing()
+            if artist.get_rasterized():
+                renderer.stop_rasterizing()
 
     # the axes class has a second argument inframe for its draw method.
+    @wraps(draw)
     def draw_wrapper(artist, renderer, *args, **kwargs):
-        before(artist, renderer)
-        draw(artist, renderer, *args, **kwargs)
-        after(artist, renderer)
+        with with_rasterized(artist, renderer):
+            return draw(artist, renderer, *args, **kwargs)
 
-    # "safe wrapping" to exactly replicate anything we haven't overridden above
-    draw_wrapper.__name__ = draw.__name__
-    draw_wrapper.__dict__ = draw.__dict__
-    draw_wrapper.__doc__ = draw.__doc__
     draw_wrapper._supports_rasterization = True
     return draw_wrapper
+
+
+def _stale_axes_callback(self, val):
+    if self.axes:
+        self.axes.stale = val
 
 
 class Artist(object):
@@ -75,8 +84,15 @@ class Artist(object):
 
     aname = 'Artist'
     zorder = 0
+    # order of precedence when bulk setting/updating properties
+    # via update.  The keys should be property names and the values
+    # integers
+    _prop_order = dict(color=-1)
 
     def __init__(self):
+        self._stale = True
+        self.stale_callback = None
+        self._axes = None
         self.figure = None
 
         self._transform = None
@@ -87,13 +103,12 @@ class Artist(object):
         self.clipbox = None
         self._clippath = None
         self._clipon = True
-        self._lod = False
         self._label = ''
         self._picker = None
         self._contains = None
         self._rasterized = None
         self._agg_filter = None
-
+        self._mouseover = False
         self.eventson = False  # fire events only if eventson
         self._oid = 0  # an observer id
         self._propobservers = {}  # a dict from oids to funcs
@@ -109,11 +124,14 @@ class Artist(object):
         self._sketch = rcParams['path.sketch']
         self._path_effects = rcParams['path.effects']
 
+        self._margins = {}
+
     def __getstate__(self):
         d = self.__dict__.copy()
         # remove the unpicklable remove method, this will get re-added on load
         # (by the axes) if the artist lives on an axes.
         d['_remove_method'] = None
+        d['stale_callback'] = None
         return d
 
     def remove(self):
@@ -137,6 +155,23 @@ class Artist(object):
         # callback has one parameter, which is the child to be removed.
         if self._remove_method is not None:
             self._remove_method(self)
+            # clear stale callback
+            self.stale_callback = None
+            _ax_flag = False
+            if hasattr(self, 'axes') and self.axes:
+                # remove from the mouse hit list
+                self.axes.mouseover_set.discard(self)
+                # mark the axes as stale
+                self.axes.stale = True
+                # decouple the artist from the axes
+                self.axes = None
+                _ax_flag = True
+
+            if self.figure:
+                self.figure = None
+                if not _ax_flag:
+                    self.figure = True
+
         else:
             raise NotImplementedError('cannot remove artist')
         # TODO: the fix for the collections relim problem is to move the
@@ -158,7 +193,6 @@ class Artist(object):
         """
         ax = getattr(self, 'axes', None)
         if ax is None or ax.xaxis is None:
-            #print 'artist.convert_xunits no conversion: ax=%s'%ax
             return x
         return ax.xaxis.convert_units(x)
 
@@ -176,16 +210,71 @@ class Artist(object):
         Set the :class:`~matplotlib.axes.Axes` instance in which the
         artist resides, if any.
 
+        This has been deprecated in mpl 1.5, please use the
+        axes property.  Will be removed in 1.7 or 2.0.
+
         ACCEPTS: an :class:`~matplotlib.axes.Axes` instance
         """
+        warnings.warn(_get_axes_msg.format('set_axes'), mplDeprecation,
+                      stacklevel=1)
         self.axes = axes
 
     def get_axes(self):
         """
         Return the :class:`~matplotlib.axes.Axes` instance the artist
-        resides in, or *None*
+        resides in, or *None*.
+
+        This has been deprecated in mpl 1.5, please use the
+        axes property.  Will be removed in 1.7 or 2.0.
         """
+        warnings.warn(_get_axes_msg.format('get_axes'), mplDeprecation,
+                      stacklevel=1)
         return self.axes
+
+    @property
+    def axes(self):
+        """
+        The :class:`~matplotlib.axes.Axes` instance the artist
+        resides in, or *None*.
+        """
+        return self._axes
+
+    @axes.setter
+    def axes(self, new_axes):
+
+        if (new_axes is not None and
+                (self._axes is not None and new_axes != self._axes)):
+            raise ValueError("Can not reset the axes.  You are "
+                             "probably trying to re-use an artist "
+                             "in more than one Axes which is not "
+                             "supported")
+
+        self._axes = new_axes
+        if new_axes is not None and new_axes is not self:
+            self.stale_callback = _stale_axes_callback
+
+        return new_axes
+
+    @property
+    def stale(self):
+        """
+        If the artist is 'stale' and needs to be re-drawn for the output to
+        match the internal state of the artist.
+        """
+        return self._stale
+
+    @stale.setter
+    def stale(self, val):
+        self._stale = val
+
+        # if the artist is animated it does not take normal part in the
+        # draw stack and is not expected to be drawn as part of the normal
+        # draw loop (when not saving) so do not propagate this change
+        if self.get_animated():
+            return
+
+        if val and self.stale_callback is not None:
+            self.stale_callback(self, val)
 
     def get_window_extent(self, renderer):
         """
@@ -193,6 +282,14 @@ class Artist(object):
         Subclasses should override for inclusion in the bounding box
         "tight" calculation. Default is to return an empty bounding
         box at 0, 0.
+
+        Be careful when using this function, the results will not update
+        if the artist window extent of the artist changes.  The extent
+        can change due to any changes in the transform stack, such as
+        changing the axes limits, the figure size, or the canvas used
+        (as is done when saving a figure).  This can lead to unexpected
+        behavior where interactive figures will look fine on the screen,
+        but will save incorrectly.
         """
         return Bbox([[0, 0], [0, 0]])
 
@@ -249,6 +346,7 @@ class Artist(object):
         self._transform = t
         self._transformSet = True
         self.pchanged()
+        self.stale = True
 
     def get_transform(self):
         """
@@ -465,6 +563,7 @@ class Artist(object):
         Only supported by the Agg and MacOSX backends.
         """
         self._snap = snap
+        self.stale = True
 
     def get_sketch_params(self):
         """
@@ -490,7 +589,7 @@ class Artist(object):
 
     def set_sketch_params(self, scale=None, length=None, randomness=None):
         """
-        Sets the the sketch parameters.
+        Sets the sketch parameters.
 
         Parameters
         ----------
@@ -512,6 +611,7 @@ class Artist(object):
             self._sketch = None
         else:
             self._sketch = (scale, length or 128.0, randomness or 16.0)
+        self.stale = True
 
     def set_path_effects(self, path_effects):
         """
@@ -519,6 +619,7 @@ class Artist(object):
         matplotlib.patheffect._Base class or its derivatives.
         """
         self._path_effects = path_effects
+        self.stale = True
 
     def get_path_effects(self):
         return self._path_effects
@@ -537,8 +638,21 @@ class Artist(object):
 
         ACCEPTS: a :class:`matplotlib.figure.Figure` instance
         """
+        # if this is a no-op just return
+        if self.figure is fig:
+            return
+        # if we currently have a figure (the case of both `self.figure`
+        # and `fig` being none is taken care of above) we then user is
+        # trying to change the figure an artist is associated with which
+        # is not allowed for the same reason as adding the same instance
+        # to more than one Axes
+        if self.figure is not None:
+            raise RuntimeError("Can not put single artist in "
+                               "more than one figure")
         self.figure = fig
-        self.pchanged()
+        if self.figure and self.figure is not self:
+            self.pchanged()
+        self.stale = True
 
     def set_clip_box(self, clipbox):
         """
@@ -548,6 +662,7 @@ class Artist(object):
         """
         self.clipbox = clipbox
         self.pchanged()
+        self.stale = True
 
     def set_clip_path(self, path, transform=None):
         """
@@ -576,13 +691,11 @@ class Artist(object):
         if transform is None:
             if isinstance(path, Rectangle):
                 self.clipbox = TransformedBbox(Bbox.unit(),
-                                              path.get_transform())
+                                               path.get_transform())
                 self._clippath = None
                 success = True
             elif isinstance(path, Patch):
-                self._clippath = TransformedPath(
-                    path.get_path(),
-                    path.get_transform())
+                self._clippath = TransformedPatchPath(path)
                 success = True
             elif isinstance(path, tuple):
                 path, transform = path
@@ -593,6 +706,9 @@ class Artist(object):
         elif isinstance(path, Path):
             self._clippath = TransformedPath(path, transform)
             success = True
+        elif isinstance(path, TransformedPatchPath):
+            self._clippath = path
+            success = True
         elif isinstance(path, TransformedPath):
             self._clippath = path
             success = True
@@ -600,8 +716,10 @@ class Artist(object):
         if not success:
             print(type(path), type(transform))
             raise TypeError("Invalid arguments to set_clip_path")
-
+        # this may result in the callbacks being hit twice, but grantees they
+        # will be hit at least once
         self.pchanged()
+        self.stale = True
 
     def get_alpha(self):
         """
@@ -644,13 +762,16 @@ class Artist(object):
         """
         Set whether artist uses clipping.
 
-        When False artists will be visible out side of the axes which 
+        When False artists will be visible out side of the axes which
         can lead to unexpected results.
 
         ACCEPTS: [True | False]
         """
         self._clipon = b
+        # This may result in the callbacks being hit twice, but ensures they
+        # are hit at least once
         self.pchanged()
+        self.stale = True
 
     def _set_gc_clip(self, gc):
         'Set the clip properly for the gc'
@@ -689,11 +810,13 @@ class Artist(object):
 
         """
         self._agg_filter = filter_func
+        self.stale = True
 
     def draw(self, renderer, *args, **kwargs):
         'Derived classes drawing method'
         if not self.get_visible():
             return
+        self.stale = False
 
     def set_alpha(self, alpha):
         """
@@ -704,17 +827,7 @@ class Artist(object):
         """
         self._alpha = alpha
         self.pchanged()
-
-    def set_lod(self, on):
-        """
-        Set Level of Detail on or off.  If on, the artists may examine
-        things like the pixel width of the axes and draw a subset of
-        their contents accordingly
-
-        ACCEPTS: [True | False]
-        """
-        self._lod = on
-        self.pchanged()
+        self.stale = True
 
     def set_visible(self, b):
         """
@@ -724,6 +837,7 @@ class Artist(object):
         """
         self._visible = b
         self.pchanged()
+        self.stale = True
 
     def set_animated(self, b):
         """
@@ -731,27 +845,52 @@ class Artist(object):
 
         ACCEPTS: [True | False]
         """
-        self._animated = b
-        self.pchanged()
+        if self._animated != b:
+            self._animated = b
+            self.pchanged()
 
     def update(self, props):
         """
         Update the properties of this :class:`Artist` from the
         dictionary *prop*.
         """
+        def _update_property(self, k, v):
+            """sorting out how to update property (setter or setattr)
+
+            Parameters
+            ----------
+            k : str
+                The name of property to update
+            v : obj
+                The value to assign to the property
+            Returns
+            -------
+            ret : obj or None
+                If using a `set_*` method return it's return, else None.
+            """
+            k = k.lower()
+            # white list attributes we want to be able to update through
+            # art.update, art.set, setp
+            if k in {'axes'}:
+                return setattr(self, k, v)
+            else:
+                func = getattr(self, 'set_' + k, None)
+                if func is None or not six.callable(func):
+                    raise AttributeError('Unknown property %s' % k)
+                return func(v)
+
         store = self.eventson
         self.eventson = False
-        changed = False
+        try:
+            ret = [_update_property(self, k, v)
+                   for k, v in props.items()]
+        finally:
+            self.eventson = store
 
-        for k, v in six.iteritems(props):
-            func = getattr(self, 'set_' + k, None)
-            if func is None or not six.callable(func):
-                raise AttributeError('Unknown property %s' % k)
-            func(v)
-            changed = True
-        self.eventson = store
-        if changed:
+        if len(ret):
             self.pchanged()
+            self.stale = True
+        return ret
 
     def get_label(self):
         """
@@ -770,6 +909,7 @@ class Artist(object):
         else:
             self._label = None
         self.pchanged()
+        self.stale = True
 
     def get_zorder(self):
         """
@@ -786,6 +926,100 @@ class Artist(object):
         """
         self.zorder = level
         self.pchanged()
+        self.stale = True
+
+    def get_top_margin(self):
+        """
+        Get whether a margin should be applied to the top of the Artist.
+        """
+        return self._margins.get('top', True)
+
+    def set_top_margin(self, margin):
+        """
+        Set whether a margin should be applied to the top of the Artist.
+        """
+        if margin != self._margins.get('top', True):
+            self.stale = True
+        self._margins['top'] = margin
+
+    top_margin = property(get_top_margin, set_top_margin)
+
+    def get_bottom_margin(self):
+        """
+        Get whether a margin should be applied to the bottom of the Artist.
+        """
+        return self._margins.get('bottom', True)
+
+    def set_bottom_margin(self, margin):
+        """
+        Set whether a margin should be applied to the bottom of the Artist.
+        """
+        if margin != self._margins.get('bottom', True):
+            self.stale = True
+        self._margins['bottom'] = margin
+
+    bottom_margin = property(get_bottom_margin, set_bottom_margin)
+
+    def get_left_margin(self):
+        """
+        Get whether a margin should be applied to the left of the Artist.
+        """
+        return self._margins.get('left', True)
+
+    def set_left_margin(self, margin):
+        """
+        Set whether a margin should be applied to the left of the Artist.
+        """
+        if margin != self._margins.get('left', True):
+            self.stale = True
+        self._margins['left'] = margin
+
+    left_margin = property(get_left_margin, set_left_margin)
+
+    def get_right_margin(self):
+        """
+        Get whether a margin should be applied to the right of the Artist.
+        """
+        return self._margins.get('right', True)
+
+    def set_right_margin(self, margin):
+        """
+        Set whether a margin should be applied to the right of the Artist.
+        """
+        if margin != self._margins.get('right', True):
+            self.stale = True
+        self._margins['right'] = margin
+
+    right_margin = property(get_right_margin, set_right_margin)
+
+    def get_margins(self):
+        """
+        Returns a dictionary describing whether a margin should be applied on
+        each of the sides (top, bottom, left and right).
+        """
+        return self._margins
+
+    def set_margins(self, margins):
+        """
+        Set the dictionary describing whether a margin should be applied on
+        each of the sides (top, bottom, left and right).  Missing keys are
+        assumed to be `True`.  If `True` or `False` are passed in, all
+        sides are set to that value.
+        """
+        if margins in (True, False):
+            margins = {
+                'top': margins,
+                'bottom': margins,
+                'left': margins,
+                'right': margins
+            }
+
+        if margins != self._margins:
+            self.stale = True
+
+        self._margins = margins
+
+    margins = property(get_margins, set_margins)
 
     def update_from(self, other):
         'Copy properties from *other* to *self*.'
@@ -796,11 +1030,11 @@ class Artist(object):
         self.clipbox = other.clipbox
         self._clipon = other._clipon
         self._clippath = other._clippath
-        self._lod = other._lod
         self._label = other._label
         self._sketch = other._sketch
         self._path_effects = other._path_effects
         self.pchanged()
+        self.stale = True
 
     def properties(self):
         """
@@ -809,16 +1043,13 @@ class Artist(object):
         return ArtistInspector(self).properties()
 
     def set(self, **kwargs):
+        """A property batch setter. Pass *kwargs* to set properties.
         """
-        A tkstyle set command, pass *kwargs* to set properties
-        """
-        ret = []
-        for k, v in six.iteritems(kwargs):
-            k = k.lower()
-            funcName = "set_%s" % k
-            func = getattr(self, funcName)
-            ret.extend([func(v)])
-        return ret
+        props = OrderedDict(
+            sorted(kwargs.items(), reverse=True,
+                   key=lambda x: (self._prop_order.get(x[0], 0), x[0])))
+
+        return self.update(props)
 
     def findobj(self, match=None, include_self=True):
         """
@@ -858,15 +1089,47 @@ class Artist(object):
             if matchfunc(c):
                 artists.append(c)
             artists.extend([thisc for thisc in
-                                c.findobj(matchfunc, include_self=False)
-                                                     if matchfunc(thisc)])
+                            c.findobj(matchfunc, include_self=False)
+                            if matchfunc(thisc)])
 
         if include_self and matchfunc(self):
             artists.append(self)
         return artists
 
+    def get_cursor_data(self, event):
+        """
+        Get the cursor data for a given event.
+        """
+        return None
 
-class ArtistInspector:
+    def format_cursor_data(self, data):
+        """
+        Return *cursor data* string formatted.
+        """
+        try:
+            data[0]
+        except (TypeError, IndexError):
+            data = [data]
+        return ', '.join('{:0.3g}'.format(item) for item in data if
+                isinstance(item, (np.floating, np.integer, int, float)))
+
+    @property
+    def mouseover(self):
+        return self._mouseover
+
+    @mouseover.setter
+    def mouseover(self, val):
+        val = bool(val)
+        self._mouseover = val
+        ax = self.axes
+        if ax:
+            if val:
+                ax.mouseover_set.add(self)
+            else:
+                ax.mouseover_set.discard(self)
+
+
+class ArtistInspector(object):
     """
     A helper class to inspect an :class:`~matplotlib.artist.Artist`
     and return information about it's settable properties and their
@@ -875,16 +1138,19 @@ class ArtistInspector:
     def __init__(self, o):
         """
         Initialize the artist inspector with an
-        :class:`~matplotlib.artist.Artist` or sequence of :class:`Artists`.
-        If a sequence is used, we assume it is a homogeneous sequence (all
+        :class:`~matplotlib.artist.Artist` or iterable of :class:`Artists`.
+        If an iterable is used, we assume it is a homogeneous sequence (all
         :class:`Artists` are of the same type) and it is your responsibility
         to make sure this is so.
         """
-        if cbook.iterable(o) and len(o):
-            o = o[0]
+        if cbook.iterable(o):
+            # Wrapped in list instead of doing try-except around next(iter(o))
+            o = list(o)
+            if len(o):
+                o = o[0]
 
         self.oorig = o
-        if not isinstance(o, type):
+        if not inspect.isclass(o):
             o = type(o)
         self.o = o
 
@@ -916,7 +1182,8 @@ class ArtistInspector:
         return aliases
 
     _get_valid_values_regex = re.compile(
-                r"\n\s*ACCEPTS:\s*((?:.|\n)*?)(?:$|(?:\n\n))")
+        r"\n\s*ACCEPTS:\s*((?:.|\n)*?)(?:$|(?:\n\n))"
+    )
 
     def get_valid_values(self, attr):
         """
@@ -926,7 +1193,8 @@ class ArtistInspector:
         for a line that begins with ACCEPTS:
 
         e.g., for a line linestyle, return
-        "[ ``'-'`` | ``'--'`` | ``'-.'`` | ``':'`` | ``'steps'`` | ``'None'`` ]"
+        "[ ``'-'`` | ``'--'`` | ``'-.'`` | ``':'`` | ``'steps'`` | ``'None'``
+        ]"
         """
 
         name = 'set_%s' % attr
@@ -943,7 +1211,7 @@ class ArtistInspector:
 
         match = self._get_valid_values_regex.search(docstring)
         if match is not None:
-            return match.group(1).replace('\n', ' ')
+            return re.sub("\n *", " ", match.group(1))
         return 'unknown'
 
     def _get_setters_and_targets(self):
@@ -959,7 +1227,11 @@ class ArtistInspector:
             o = getattr(self.o, name)
             if not six.callable(o):
                 continue
-            if len(inspect.getargspec(o)[0]) < 2:
+            if six.PY2:
+                nargs = len(inspect.getargspec(o)[0])
+            else:
+                nargs = len(inspect.getfullargspec(o)[0])
+            if nargs < 2:
                 continue
             func = o
             if self.is_alias(func):
@@ -1002,8 +1274,7 @@ class ArtistInspector:
 
         if s in self.aliasd:
             return s + ''.join([' or %s' % x
-                                for x
-                                in six.iterkeys(self.aliasd[s])])
+                                for x in sorted(self.aliasd[s])])
         else:
             return s
 
@@ -1019,8 +1290,7 @@ class ArtistInspector:
 
         if s in self.aliasd:
             aliases = ''.join([' or %s' % x
-                               for x
-                               in six.iterkeys(self.aliasd[s])])
+                               for x in sorted(self.aliasd[s])])
         else:
             aliases = ''
         return ':meth:`%s <%s>`%s' % (s, target, aliases)
@@ -1086,7 +1356,7 @@ class ArtistInspector:
 
         lines.append('')
         lines.append(table_formatstr)
-        lines.append(pad + 'Property'.ljust(col0_len + 3) + \
+        lines.append(pad + 'Property'.ljust(col0_len + 3) +
                      'Description'.ljust(col1_len))
         lines.append(table_formatstr)
 
@@ -1095,14 +1365,6 @@ class ArtistInspector:
 
         lines.append(table_formatstr)
         lines.append('')
-        return lines
-        ########
-
-        for prop, path in attrs:
-            accepts = self.get_valid_values(prop)
-            name = self.aliased_name_rest(prop, path)
-
-            lines.append('%s%s: %s' % (pad, name, accepts))
         return lines
 
     def properties(self):
@@ -1113,7 +1375,6 @@ class ArtistInspector:
         getters = [name for name in dir(o)
                    if name.startswith('get_')
                    and six.callable(getattr(o, name))]
-        #print getters
         getters.sort()
         d = dict()
         for name in getters:
@@ -1122,7 +1383,9 @@ class ArtistInspector:
                 continue
 
             try:
-                val = func()
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    val = func()
             except:
                 continue
             else:
@@ -1246,8 +1509,8 @@ def setp(obj, *args, **kwargs):
       >>> line, = plot([1,2,3])
       >>> setp(line, linestyle='--')
 
-    If you want to know the valid types of arguments, you can provide the
-    name of the property you want to set without a value::
+    If you want to know the valid types of arguments, you can provide
+    the name of the property you want to set without a value::
 
       >>> setp(line, 'linestyle')
           linestyle: [ '-' | '--' | '-.' | ':' | 'steps' | 'None' ]
@@ -1258,12 +1521,18 @@ def setp(obj, *args, **kwargs):
       >>> setp(line)
           ... long output listing omitted
 
-    :func:`setp` operates on a single instance or a list of instances.
-    If you are in query mode introspecting the possible values, only
-    the first instance in the sequence is used.  When actually setting
-    values, all the instances will be set.  e.g., suppose you have a
-    list of two lines, the following will make both lines thicker and
-    red::
+    You may specify another output file to `setp` if `sys.stdout` is not
+    acceptable for some reason using the `file` keyword-only argument::
+
+      >>> with fopen('output.log') as f:
+      >>>     setp(line, file=f)
+
+    :func:`setp` operates on a single instance or a iterable of
+    instances. If you are in query mode introspecting the possible
+    values, only the first instance in the sequence is used. When
+    actually setting values, all the instances will be set.  e.g.,
+    suppose you have a list of two lines, the following will make both
+    lines thicker and red::
 
       >>> x = arange(0,1.0,0.01)
       >>> y1 = sin(2*pi*x)
@@ -1278,36 +1547,35 @@ def setp(obj, *args, **kwargs):
       >>> setp(lines, linewidth=2, color='r')        # python style
     """
 
-    insp = ArtistInspector(obj)
-
-    if len(kwargs) == 0 and len(args) == 0:
-        print('\n'.join(insp.pprint_setters()))
-        return
-
-    if len(kwargs) == 0 and len(args) == 1:
-        print(insp.pprint_setters(prop=args[0]))
-        return
-
     if not cbook.iterable(obj):
         objs = [obj]
     else:
-        objs = cbook.flatten(obj)
+        objs = list(cbook.flatten(obj))
+
+    insp = ArtistInspector(objs[0])
+
+    # file has to be popped before checking if kwargs is empty
+    printArgs = {}
+    if 'file' in kwargs:
+        printArgs['file'] = kwargs.pop('file')
+
+    if not kwargs and len(args) < 2:
+        if args:
+            print(insp.pprint_setters(prop=args[0]), **printArgs)
+        else:
+            print('\n'.join(insp.pprint_setters()), **printArgs)
+        return
 
     if len(args) % 2:
         raise ValueError('The set args must be string, value pairs')
 
-    funcvals = []
+    # put args into ordereddict to maintain order
+    funcvals = OrderedDict()
     for i in range(0, len(args) - 1, 2):
-        funcvals.append((args[i], args[i + 1]))
-    funcvals.extend(kwargs.items())
+        funcvals[args[i]] = args[i + 1]
 
-    ret = []
-    for o in objs:
-        for s, val in funcvals:
-            s = s.lower()
-            funcName = "set_%s" % s
-            func = getattr(o, funcName)
-            ret.extend([func(val)])
+    ret = [o.update(funcvals) for o in objs]
+    ret.extend([o.set(**kwargs) for o in objs])
     return [x for x in cbook.flatten(ret)]
 
 
@@ -1315,8 +1583,11 @@ def kwdoc(a):
     hardcopy = matplotlib.rcParams['docstring.hardcopy']
     if hardcopy:
         return '\n'.join(ArtistInspector(a).pprint_setters_rest(
-                                            leadingspace=2))
+                         leadingspace=2))
     else:
         return '\n'.join(ArtistInspector(a).pprint_setters(leadingspace=2))
 
 docstring.interpd.update(Artist=kwdoc(Artist))
+
+_get_axes_msg = """{0} has been deprecated in mpl 1.5, please use the
+axes property.  A removal date has not been set."""

@@ -1,7 +1,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 """
 Core functions and attributes for the matplotlib style library:
@@ -18,21 +18,42 @@ Core functions and attributes for the matplotlib style library:
 import os
 import re
 import contextlib
+import warnings
 
 import matplotlib as mpl
 from matplotlib import cbook
-from matplotlib import rc_params_from_file
+from matplotlib import rc_params_from_file, rcParamsDefault
 
 
 __all__ = ['use', 'context', 'available', 'library', 'reload_library']
 
 
-_here = os.path.abspath(os.path.dirname(__file__))
-BASE_LIBRARY_PATH = os.path.join(_here, 'stylelib')
+BASE_LIBRARY_PATH = os.path.join(mpl.get_data_path(), 'stylelib')
 # Users may want multiple library paths, so store a list of paths.
 USER_LIBRARY_PATHS = [os.path.join(mpl._get_configdir(), 'stylelib')]
 STYLE_EXTENSION = 'mplstyle'
 STYLE_FILE_PATTERN = re.compile('([\S]+).%s$' % STYLE_EXTENSION)
+
+
+# A list of rcParams that should not be applied from styles
+STYLE_BLACKLIST = set([
+    'interactive', 'backend', 'backend.qt4', 'webagg.port',
+    'webagg.port_retries', 'webagg.open_in_browser', 'backend_fallback',
+    'toolbar', 'timezone', 'datapath', 'figure.max_open_warning',
+    'savefig.directory', 'tk.window_focus', 'hardcopy.docstring'])
+
+
+def _remove_blacklisted_style_params(d, warn=True):
+    o = {}
+    for key, val in d.items():
+        if key in STYLE_BLACKLIST:
+            if warn:
+                warnings.warn(
+                    "Style includes a parameter, '{0}', that is not related "
+                    "to style.  Ignoring".format(key))
+        else:
+            o[key] = val
+    return o
 
 
 def is_style_file(filename):
@@ -40,43 +61,78 @@ def is_style_file(filename):
     return STYLE_FILE_PATTERN.match(filename) is not None
 
 
-def use(name):
-    """Use matplotlib style settings from a known style sheet or from a file.
+def _apply_style(d, warn=True):
+    mpl.rcParams.update(_remove_blacklisted_style_params(d, warn=warn))
+
+
+def use(style):
+    """Use matplotlib style settings from a style specification.
+
+    The style name of 'default' is reserved for reverting back to
+    the default style settings.
 
     Parameters
     ----------
-    name : str or list of str
-        Name of style or path/URL to a style file. For a list of available
-        style names, see `style.available`. If given a list, each style is
-        applied from first to last in the list.
-    """
-    if cbook.is_string_like(name):
-        name = [name]
+    style : str, dict, or list
+        A style specification. Valid options are:
 
-    for style in name:
-        if style in library:
-            mpl.rcParams.update(library[style])
+        +------+-------------------------------------------------------------+
+        | str  | The name of a style or a path/URL to a style file. For a    |
+        |      | list of available style names, see `style.available`.       |
+        +------+-------------------------------------------------------------+
+        | dict | Dictionary with valid key/value pairs for                   |
+        |      | `matplotlib.rcParams`.                                      |
+        +------+-------------------------------------------------------------+
+        | list | A list of style specifiers (str or dict) applied from first |
+        |      | to last in the list.                                        |
+        +------+-------------------------------------------------------------+
+
+
+    """
+    if cbook.is_string_like(style) or hasattr(style, 'keys'):
+        # If name is a single str or dict, make it a single element list.
+        styles = [style]
+    else:
+        styles = style
+
+    for style in styles:
+        if not cbook.is_string_like(style):
+            _apply_style(style)
+        elif style == 'default':
+            _apply_style(rcParamsDefault, warn=False)
+        elif style in library:
+            _apply_style(library[style])
         else:
             try:
                 rc = rc_params_from_file(style, use_default_template=False)
-                mpl.rcParams.update(rc)
-            except:
+                _apply_style(rc)
+            except IOError:
                 msg = ("'%s' not found in the style library and input is "
                        "not a valid URL or path. See `style.available` for "
                        "list of available styles.")
-                raise ValueError(msg % style)
+                raise IOError(msg % style)
 
 
 @contextlib.contextmanager
-def context(name, after_reset=False):
+def context(style, after_reset=False):
     """Context manager for using style settings temporarily.
 
     Parameters
     ----------
-    name : str or list of str
-        Name of style or path/URL to a style file. For a list of available
-        style names, see `style.available`. If given a list, each style is
-        applied from first to last in the list.
+    style : str, dict, or list
+        A style specification. Valid options are:
+
+        +------+-------------------------------------------------------------+
+        | str  | The name of a style or a path/URL to a style file. For a    |
+        |      | list of available style names, see `style.available`.       |
+        +------+-------------------------------------------------------------+
+        | dict | Dictionary with valid key/value pairs for                   |
+        |      | `matplotlib.rcParams`.                                      |
+        +------+-------------------------------------------------------------+
+        | list | A list of style specifiers (str or dict) applied from first |
+        |      | to last in the list.                                        |
+        +------+-------------------------------------------------------------+
+
     after_reset : bool
         If True, apply style after resetting settings to their defaults;
         otherwise, apply style on top of the current settings.
@@ -84,9 +140,16 @@ def context(name, after_reset=False):
     initial_settings = mpl.rcParams.copy()
     if after_reset:
         mpl.rcdefaults()
-    use(name)
-    yield
-    mpl.rcParams.update(initial_settings)
+    try:
+        use(style)
+    except:
+        # Restore original settings before raising errors during the update.
+        mpl.rcParams.update(initial_settings)
+        raise
+    else:
+        yield
+    finally:
+        mpl.rcParams.update(initial_settings)
 
 
 def load_base_library():

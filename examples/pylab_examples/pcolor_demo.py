@@ -19,14 +19,12 @@ z = z[:-1, :-1]
 z_min, z_max = -np.abs(z).max(), np.abs(z).max()
 
 
-
 plt.subplot(2, 2, 1)
 plt.pcolor(x, y, z, cmap='RdBu', vmin=z_min, vmax=z_max)
 plt.title('pcolor')
 # set the limits of the plot to the limits of the data
 plt.axis([x.min(), x.max(), y.min(), y.max()])
 plt.colorbar()
-
 
 
 plt.subplot(2, 2, 2)
@@ -37,14 +35,12 @@ plt.axis([x.min(), x.max(), y.min(), y.max()])
 plt.colorbar()
 
 
-
 plt.subplot(2, 2, 3)
 plt.imshow(z, cmap='RdBu', vmin=z_min, vmax=z_max,
            extent=[x.min(), x.max(), y.min(), y.max()],
            interpolation='nearest', origin='lower')
-plt.title('image (interp. nearest)')
+plt.title('image (nearest)')
 plt.colorbar()
-
 
 
 ax = plt.subplot(2, 2, 4)
@@ -52,6 +48,6 @@ ax.pcolorfast(x, y, z, cmap='RdBu', vmin=z_min, vmax=z_max)
 plt.title('pcolorfast')
 plt.colorbar()
 
-
+plt.subplots_adjust(wspace=0.5, hspace=0.5)
 
 plt.show()

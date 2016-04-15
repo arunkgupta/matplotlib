@@ -4,16 +4,19 @@ Tests specific to the collections module.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
+
+import io
 
 from nose.tools import assert_equal
 import numpy as np
 from numpy.testing import assert_array_equal, assert_array_almost_equal
+from nose.plugins.skip import SkipTest
 
 import matplotlib.pyplot as plt
 import matplotlib.collections as mcollections
 import matplotlib.transforms as mtransforms
-from matplotlib.collections import EventCollection
+from matplotlib.collections import Collection, EventCollection
 from matplotlib.testing.decorators import cleanup, image_comparison
 
 
@@ -323,6 +326,19 @@ def test__EventCollection__set_linestyle():
     splt.set_title('EventCollection: set_linestyle')
 
 
+@image_comparison(baseline_images=['EventCollection_plot__set_ls_dash'],
+                  remove_text=True)
+def test__EventCollection__set_linestyle_single_dash():
+    '''
+    check to make sure set_linestyle accepts a single dash pattern
+    '''
+    splt, coll, _ = generate_EventCollection_plot()
+    new_linestyle = (0, (6., 6.))
+    coll.set_linestyle(new_linestyle)
+    assert_equal(coll.get_linestyle(), [(0, (6.0, 6.0))])
+    splt.set_title('EventCollection: set_linestyle')
+
+
 @image_comparison(baseline_images=['EventCollection_plot__set_linewidth'])
 def test__EventCollection__set_linewidth():
     '''
@@ -407,14 +423,12 @@ def test_null_collection_datalim():
 def test_add_collection():
     # Test if data limits are unchanged by adding an empty collection.
     # Github issue #1490, pull #1497.
-    ax = plt.axes()
     plt.figure()
-    ax2 = plt.axes()
-    coll = ax2.scatter([0, 1], [0, 1])
+    ax = plt.axes()
+    coll = ax.scatter([0, 1], [0, 1])
     ax.add_collection(coll)
     bounds = ax.dataLim.bounds
-    coll = ax2.scatter([], [])
-    ax.add_collection(coll)
+    coll = ax.scatter([], [])
     assert_equal(ax.dataLim.bounds, bounds)
 
 
@@ -473,6 +487,156 @@ def test_EllipseCollection():
                                         facecolors='none')
     ax.add_collection(ec)
     ax.autoscale_view()
+
+
+@image_comparison(baseline_images=['polycollection_close'],
+                  extensions=['png'], remove_text=True)
+def test_polycollection_close():
+    from mpl_toolkits.mplot3d import Axes3D
+
+    vertsQuad = [
+        [[0., 0.], [0., 1.], [1., 1.], [1., 0.]],
+        [[0., 1.], [2., 3.], [2., 2.], [1., 1.]],
+        [[2., 2.], [2., 3.], [4., 1.], [3., 1.]],
+        [[3., 0.], [3., 1.], [4., 1.], [4., 0.]]]
+
+    fig = plt.figure()
+    ax = Axes3D(fig)
+
+    colors = ['r', 'g', 'b', 'y', 'k']
+    zpos = list(range(5))
+
+    poly = mcollections.PolyCollection(
+        vertsQuad * len(zpos), linewidth=0.25)
+    poly.set_alpha(0.7)
+
+    # need to have a z-value for *each* polygon = element!
+    zs = []
+    cs = []
+    for z, c in zip(zpos, colors):
+        zs.extend([z] * len(vertsQuad))
+        cs.extend([c] * len(vertsQuad))
+
+    poly.set_color(cs)
+
+    ax.add_collection3d(poly, zs=zs, zdir='y')
+
+    # axis limit settings:
+    ax.set_xlim3d(0, 4)
+    ax.set_zlim3d(0, 3)
+    ax.set_ylim3d(0, 4)
+
+
+@image_comparison(baseline_images=['regularpolycollection_rotate'],
+                  extensions=['png'], remove_text=True)
+def test_regularpolycollection_rotate():
+    xx, yy = np.mgrid[:10, :10]
+    xy_points = np.transpose([xx.flatten(), yy.flatten()])
+    rotations = np.linspace(0, 2*np.pi, len(xy_points))
+
+    fig, ax = plt.subplots()
+    for xy, alpha in zip(xy_points, rotations):
+        col = mcollections.RegularPolyCollection(
+            4, sizes=(100,), rotation=alpha,
+            offsets=xy, transOffset=ax.transData)
+        ax.add_collection(col, autolim=True)
+    ax.autoscale_view()
+
+
+@image_comparison(baseline_images=['regularpolycollection_scale'],
+                  extensions=['png'], remove_text=True)
+def test_regularpolycollection_scale():
+    # See issue #3860
+
+    class SquareCollection(mcollections.RegularPolyCollection):
+        def __init__(self, **kwargs):
+            super(SquareCollection, self).__init__(
+                4, rotation=np.pi/4., **kwargs)
+
+        def get_transform(self):
+            """Return transform scaling circle areas to data space."""
+            ax = self.axes
+
+            pts2pixels = 72.0 / ax.figure.dpi
+
+            scale_x = pts2pixels * ax.bbox.width / ax.viewLim.width
+            scale_y = pts2pixels * ax.bbox.height / ax.viewLim.height
+            return mtransforms.Affine2D().scale(scale_x, scale_y)
+
+    fig, ax = plt.subplots()
+
+    xy = [(0, 0)]
+    # Unit square has a half-diagonal of `1 / sqrt(2)`, so `pi * r**2`
+    # equals...
+    circle_areas = [np.pi / 2]
+    squares = SquareCollection(sizes=circle_areas, offsets=xy,
+                               transOffset=ax.transData)
+    ax.add_collection(squares, autolim=True)
+    ax.axis([-1, 1, -1, 1])
+
+
+@cleanup
+def test_picking():
+    fig, ax = plt.subplots()
+    col = ax.scatter([0], [0], [1000])
+    fig.savefig(io.BytesIO(), dpi=fig.dpi)
+
+    class MouseEvent(object):
+        pass
+    event = MouseEvent()
+    event.x = 325
+    event.y = 240
+
+    found, indices = col.contains(event)
+    assert found
+    assert_array_equal(indices['ind'], [0])
+
+
+@cleanup
+def test_linestyle_single_dashes():
+    plt.scatter([0, 1, 2], [0, 1, 2], linestyle=(0., [2., 2.]))
+    plt.draw()
+
+
+@image_comparison(baseline_images=['size_in_xy'], remove_text=True,
+                  extensions=['png'])
+def test_size_in_xy():
+    fig, ax = plt.subplots()
+
+    widths, heights, angles = (10, 10), 10, 0
+    widths = 10, 10
+    coords = [(10, 10), (15, 15)]
+    e = mcollections.EllipseCollection(
+        widths, heights, angles,
+        units='xy',
+        offsets=coords,
+        transOffset=ax.transData)
+
+    ax.add_collection(e)
+
+    ax.set_xlim(0, 30)
+    ax.set_ylim(0, 30)
+
+
+def test_pandas_indexing():
+    try:
+        import pandas as pd
+    except ImportError:
+        raise SkipTest("Pandas not installed")
+
+    # Should not fail break when faced with a
+    # non-zero indexed series
+    index = [11, 12, 13]
+    ec = fc = pd.Series(['red', 'blue', 'green'], index=index)
+    lw = pd.Series([1, 2, 3], index=index)
+    ls = pd.Series(['solid', 'dashed', 'dashdot'], index=index)
+    aa = pd.Series([True, False, True], index=index)
+
+    Collection(edgecolors=ec)
+    Collection(facecolors=fc)
+    Collection(linewidths=lw)
+    Collection(linestyles=ls)
+    Collection(antialiaseds=aa)
 
 
 if __name__ == '__main__':

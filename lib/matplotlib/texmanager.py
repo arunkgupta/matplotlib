@@ -26,8 +26,8 @@ as follows::
   Z = self.texmanager.get_rgba(s, size=12, dpi=80, rgb=(1,0,0))
 
 To enable tex rendering of all text in your matplotlib figure, set
-text.usetex in your matplotlibrc file (http://matplotlib.sf.net/matplotlibrc)
-or include these two lines in your script::
+text.usetex in your matplotlibrc file or include these two lines in
+your script::
 
   from matplotlib import rc
   rc('text', usetex=True)
@@ -37,7 +37,7 @@ or include these two lines in your script::
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 import copy
 import glob
@@ -53,7 +53,7 @@ import numpy as np
 import matplotlib as mpl
 from matplotlib import rcParams
 from matplotlib._png import read_png
-from matplotlib.cbook import mkdirs
+from matplotlib.cbook import mkdirs, Locked
 from matplotlib.compat.subprocess import Popen, PIPE, STDOUT
 import matplotlib.dviread as dviread
 import re
@@ -70,23 +70,23 @@ def dvipng_hack_alpha():
     try:
         p = Popen(['dvipng', '-version'], stdin=PIPE, stdout=PIPE,
                   stderr=STDOUT, close_fds=(sys.platform != 'win32'))
+        stdout, stderr = p.communicate()
     except OSError:
         mpl.verbose.report('No dvipng was found', 'helpful')
         return False
-    stdin, stdout = p.stdin, p.stdout
-    for line in stdout:
-        if line.startswith(b'dvipng '):
+    lines = stdout.decode(sys.getdefaultencoding()).split('\n')
+    for line in lines:
+        if line.startswith('dvipng '):
             version = line.split()[-1]
             mpl.verbose.report('Found dvipng version %s' % version,
                                'helpful')
-            version = version.decode('ascii')
             version = distutils.version.LooseVersion(version)
             return version < distutils.version.LooseVersion('1.6')
     mpl.verbose.report('Unexpected response from dvipng -version', 'helpful')
     return False
 
 
-class TexManager:
+class TexManager(object):
     """
     Convert strings to dvi files using TeX, caching the results to a
     working dir
@@ -203,6 +203,11 @@ Could not rename old TeX cache dir "%s": a suitable configuration
                                    'default.' % ff, 'helpful')
                 setattr(self, font_family_attr, self.font_info[font_family])
             fontconfig.append(getattr(self, font_family_attr)[0])
+        # Add a hash of the latex preamble to self._fontconfig so that the
+        # correct png is selected for strings rendered with same font and dpi
+        # even if the latex preamble changes within the session
+        preamble_bytes = six.text_type(self.get_custom_preamble()).encode('utf-8')
+        fontconfig.append(md5(preamble_bytes).hexdigest())
         self._fontconfig = ''.join(fontconfig)
 
         # The following packages and commands need to be included in the latex
@@ -398,7 +403,8 @@ Could not rename old TeX cache dir "%s": a suitable configuration
                 'latex -interaction=nonstopmode %s > "%s"' %
                 (os.path.split(texfile)[-1], outfile))
             mpl.verbose.report(command, 'debug')
-            exit_status = os.system(command)
+            with Locked(self.texcache):
+                exit_status = os.system(command)
             try:
                 with open(outfile) as fh:
                     report = fh.read()
@@ -668,10 +674,7 @@ Could not rename old TeX cache dir "%s": a suitable configuration
         else:
             # use dviread. It sometimes returns a wrong descent.
             dvifile = self.make_dvi(tex, fontsize)
-            dvi = dviread.Dvi(dvifile, 72 * dpi_fraction)
-            try:
+            with dviread.Dvi(dvifile, 72 * dpi_fraction) as dvi:
                 page = next(iter(dvi))
-            finally:
-                dvi.close()
             # A total height (including the descent) needs to be returned.
             return page.width, page.height + page.descent, page.descent

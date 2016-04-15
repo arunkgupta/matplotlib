@@ -1,13 +1,16 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import map
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import map
 
 from matplotlib.gridspec import GridSpec, SubplotSpec
 from matplotlib import docstring
 import matplotlib.artist as martist
 from matplotlib.axes._axes import Axes
+
+import warnings
+from matplotlib.cbook import mplDeprecation
 
 
 class SubplotBase(object):
@@ -55,6 +58,10 @@ class SubplotBase(object):
                 num = [int(n) for n in num]
                 self._subplotspec = GridSpec(rows, cols)[num[0] - 1:num[1]]
             else:
+                if num < 1 or num > rows*cols:
+                    raise ValueError(
+                        "num must be 1 <= num <= {maxn}, not {num}".format(
+                            maxn=rows*cols, num=num))
                 self._subplotspec = GridSpec(rows, cols)[int(num) - 1]
                 # num - 1 for converting from MATLAB to python indexing
         else:
@@ -66,17 +73,21 @@ class SubplotBase(object):
         self._axes_class.__init__(self, fig, self.figbox, **kwargs)
 
     def __reduce__(self):
-        # get the first axes class which does not inherit from a subplotbase
-        not_subplotbase = lambda c: issubclass(c, Axes) and \
-            not issubclass(c, SubplotBase)
-        axes_class = [c for c in self.__class__.mro() if not_subplotbase(c)][0]
+        # get the first axes class which does not
+        # inherit from a subplotbase
+
+        def not_subplotbase(c):
+            return issubclass(c, Axes) and not issubclass(c, SubplotBase)
+
+        axes_class = [c for c in self.__class__.mro()
+                      if not_subplotbase(c)][0]
         r = [_PicklableSubplotClassConstructor(),
              (axes_class,),
              self.__getstate__()]
         return tuple(r)
 
     def get_geometry(self):
-        """get the subplot geometry, eg 2,2,3"""
+        """get the subplot geometry, e.g., 2,2,3"""
         rows, cols, num1, num2 = self.get_subplotspec().get_geometry()
         return rows, cols, num1 + 1  # for compatibility
 
@@ -125,9 +136,10 @@ class SubplotBase(object):
         firstcol = self.is_first_col()
         for label in self.get_xticklabels():
             label.set_visible(lastrow)
-
+        self.get_xaxis().get_offset_text().set_visible(lastrow)
         for label in self.get_yticklabels():
             label.set_visible(firstcol)
+        self.get_yaxis().get_offset_text().set_visible(firstcol)
 
     def _make_twin_axes(self, *kl, **kwargs):
         """

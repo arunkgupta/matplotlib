@@ -1,15 +1,10 @@
-#Demo of using multiprocessing for generating data in one process and plotting
-#in another.
-#Written by Robert Cimrman
-#Requires >= Python 2.6 for the multiprocessing module or having the
-#standalone processing module installed
+# Demo of using multiprocessing for generating data in one process and plotting
+# in another.
+# Written by Robert Cimrman
 
 from __future__ import print_function
 import time
-try:
-    from multiprocessing import Process, Pipe
-except ImportError:
-    from processing import Process, Pipe
+from multiprocessing import Process, Pipe
 import numpy as np
 
 import matplotlib
@@ -17,8 +12,8 @@ matplotlib.use('GtkAgg')
 import matplotlib.pyplot as plt
 import gobject
 
-class ProcessPlotter(object):
 
+class ProcessPlotter(object):
     def __init__(self):
         self.x = []
         self.y = []
@@ -64,8 +59,8 @@ class NBPlot(object):
     def __init__(self):
         self.plot_pipe, plotter_pipe = Pipe()
         self.plotter = ProcessPlotter()
-        self.plot_process = Process(target = self.plotter,
-                                    args = (plotter_pipe,))
+        self.plot_process = Process(target=self.plotter,
+                                    args=(plotter_pipe,))
         self.plot_process.daemon = True
         self.plot_process.start()
 
@@ -76,6 +71,7 @@ class NBPlot(object):
         else:
             data = np.random.random(2)
             send(data)
+
 
 def main():
     pl = NBPlot()

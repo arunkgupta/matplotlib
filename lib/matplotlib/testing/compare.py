@@ -5,7 +5,7 @@ Provides a collection of utilities for comparing (image) results.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 import hashlib
 import os
@@ -15,7 +15,7 @@ import numpy as np
 
 import matplotlib
 from matplotlib.compat import subprocess
-from matplotlib.testing.noseclasses import ImageComparisonFailure
+from matplotlib.testing.exceptions import ImageComparisonFailure
 from matplotlib import _png
 from matplotlib import _get_cachedir
 from matplotlib import cbook
@@ -123,15 +123,15 @@ def make_external_conversion_command(cmd):
 def _update_converter():
     gs, gs_v = matplotlib.checkdep_ghostscript()
     if gs_v is not None:
-        cmd = lambda old, new: \
-            [gs, '-q', '-sDEVICE=png16m', '-dNOPAUSE', '-dBATCH',
+        def cmd(old, new):
+            return [gs, '-q', '-sDEVICE=png16m', '-dNOPAUSE', '-dBATCH',
              '-sOutputFile=' + new, old]
         converter['pdf'] = make_external_conversion_command(cmd)
         converter['eps'] = make_external_conversion_command(cmd)
 
     if matplotlib.checkdep_inkscape() is not None:
-        cmd = lambda old, new: \
-            ['inkscape', '-z', old, '--export-png', new]
+        def cmd(old, new):
+            return ['inkscape', '-z', old, '--export-png', new]
         converter['svg'] = make_external_conversion_command(cmd)
 
 
@@ -166,8 +166,8 @@ def convert(filename, cache):
     """
     base, extension = filename.rsplit('.', 1)
     if extension not in converter:
-        raise ImageComparisonFailure(
-            "Don't know how to convert %s files to png" % extension)
+        from nose import SkipTest
+        raise SkipTest("Don't know how to convert %s files to png" % extension)
     newname = base + '_' + extension + '.png'
     if not os.path.exists(filename):
         raise IOError("'%s' does not exist" % filename)
@@ -242,6 +242,11 @@ def crop_to_same(actual_path, actual_image, expected_path, expected_image):
 
 def calculate_rms(expectedImage, actualImage):
     "Calculate the per-pixel errors, then compute the root mean square error."
+    if expectedImage.shape != actualImage.shape:
+        raise ImageComparisonFailure(
+            "image sizes do not match expected size: {0} "
+            "actual size {1}".format(expectedImage.shape, actualImage.shape))
+
     num_values = np.prod(expectedImage.shape)
     abs_diff_image = abs(expectedImage - actualImage)
 
@@ -318,6 +323,12 @@ def compare_images(expected, actual, tol, in_decorator=False):
     actualImage, expectedImage = crop_to_same(
         actual, actualImage, expected, expectedImage)
 
+    diff_image = make_test_filename(actual, 'failed-diff')
+
+    if tol <= 0.0:
+        if np.array_equal(expectedImage, actualImage):
+            return None
+
     # convert to signed integers, so that the images can be subtracted without
     # overflow
     expectedImage = expectedImage.astype(np.int16)
@@ -325,11 +336,7 @@ def compare_images(expected, actual, tol, in_decorator=False):
 
     rms = calculate_rms(expectedImage, actualImage)
 
-    diff_image = make_test_filename(actual, 'failed-diff')
-
     if rms <= tol:
-        if os.path.exists(diff_image):
-            os.unlink(diff_image)
         return None
 
     save_diff_image(expected, actual, diff_image)
@@ -375,4 +382,4 @@ def save_diff_image(expected, actual, output):
     # Hard-code the alpha channel to fully solid
     save_image_np[:, :, 3] = 255
 
-    _png.write_png(save_image_np.tostring(), width, height, output)
+    _png.write_png(save_image_np, output)

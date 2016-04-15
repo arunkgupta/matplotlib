@@ -35,14 +35,14 @@ triang.set_mask(mask)
 # tripcolor plot.
 plt.figure()
 plt.gca().set_aspect('equal')
-plt.tripcolor(triang, z, shading='flat', cmap=plt.cm.rainbow)
+plt.tripcolor(triang, z, shading='flat')
 plt.colorbar()
 plt.title('tripcolor of Delaunay triangulation, flat shading')
 
 # Illustrate Gouraud shading.
 plt.figure()
 plt.gca().set_aspect('equal')
-plt.tripcolor(triang, z, shading='gouraud', cmap=plt.cm.rainbow)
+plt.tripcolor(triang, z, shading='gouraud')
 plt.colorbar()
 plt.title('tripcolor of Delaunay triangulation, gouraud shading')
 
@@ -97,12 +97,12 @@ xmid = x[triangles].mean(axis=1)
 ymid = y[triangles].mean(axis=1)
 x0 = -5
 y0 = 52
-zfaces = np.exp(-0.01*((xmid-x0)*(xmid-x0) + (ymid-y0)*(ymid-y0)))
+zfaces = np.exp(-0.01*((xmid - x0)*(xmid - x0) + (ymid - y0)*(ymid - y0)))
 
 # Rather than create a Triangulation object, can simply pass x, y and triangles
 # arrays to tripcolor directly.  It would be better to use a Triangulation
 # object if the same triangulation was to be used more than once to save
-#duplicated calculations.
+# duplicated calculations.
 # Can specify one color value per face rather than one per point by using the
 # facecolors kwarg.
 plt.figure()

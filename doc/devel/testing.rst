@@ -9,7 +9,7 @@ customizations to the nose testing infrastructure are in
 :mod:`matplotlib.testing`. (There is other old testing cruft around,
 please ignore it while we consolidate our testing to these locations.)
 
-.. _nose: http://somethingaboutorange.com/mrl/projects/nose/
+.. _nose: http://nose.readthedocs.org/en/latest/
 
 Requirements
 ------------
@@ -18,23 +18,66 @@ The following software is required to run the tests:
 
   - nose_, version 1.0 or later
 
+  - `mock <http://www.voidspace.org.uk/python/mock/>`_, when running python
+    versions < 3.3
+
   - `Ghostscript <http://pages.cs.wisc.edu/~ghost/>`_ (to render PDF
     files)
 
   - `Inkscape <http://inkscape.org>`_ (to render SVG files)
 
+Optionally you can install:
+
+  - `coverage <http://nedbatchelder.com/code/coverage/>`_ to collect coverage
+    information
+
+  - `pep8 <http://pep8.readthedocs.org/en/latest>`_ to test coding standards
+
+Building matplotlib for image comparison tests
+----------------------------------------------
+
+matplotlib's test suite makes heavy use of image comparison tests,
+meaning the result of a plot is compared against a known good result.
+Unfortunately, different versions of FreeType produce differently
+formed characters, causing these image comparisons to fail.  To make
+them reproducible, matplotlib can be built with a special local copy
+of FreeType.  This is recommended for all matplotlib developers.
+
+Add the following content to a ``setup.cfg`` file at the root of the
+matplotlib source directory::
+
+  [test]
+  local_freetype = True
+
+or by setting the ``MPLLOCALFREETYPE`` environmental variable to any true
+value.
+
 Running the tests
 -----------------
 
-Running the tests is simple. Make sure you have nose installed and run
-the script :file:`tests.py` in the root directory of the distribution.
-The script can take any of the usual `nosetest arguments`_, such as
+Running the tests is simple. Make sure you have nose installed and run::
 
-===================  ===========
-``-v``               increase verbosity
-``-d``               detailed error messages
-``--with-coverage``  enable collecting coverage information
-===================  ===========
+   python tests.py
+
+in the root directory of the distribution. The script takes a set of
+commands, such as:
+
+========================  ===========
+``--pep8``                pep8 checks
+``--no-pep8``             Do not perform pep8 checks
+``--no-network``          Disable tests that require network access
+========================  ===========
+
+Additional arguments are passed on to nosetests. See the nose
+documentation for supported arguments. Some of the more important ones are given
+here:
+
+=============================  ===========
+``--verbose``                  Be more verbose
+``--processes=NUM``            Run tests in parallel over NUM processes
+``--process-timeout=SECONDS``  Set timeout for results from test runner process
+``--nocapture``                Do not capture stdout
+=============================  ===========
 
 To run a single test from the command line, you can provide a
 dot-separated path to the module followed by the function separated by
@@ -42,19 +85,29 @@ a colon, e.g., (this is assuming the test is installed)::
 
   python tests.py matplotlib.tests.test_simplification:test_clipping
 
+If you want to run the full test suite, but want to save wall time try
+running the tests in parallel::
+
+  python tests.py --nocapture --nose-verbose --processes=5 --process-timeout=300
+
+
 An alternative implementation that does not look at command line
-arguments works from within Python::
+arguments works from within Python is to run the tests from the
+matplotlib library function :func:`matplotlib.test`::
 
   import matplotlib
   matplotlib.test()
 
+.. hint::
 
-.. _`nosetest arguments`: http://somethingaboutorange.com/mrl/projects/nose/1.0.0/usage.html
+   To run the tests you need to install nose and mock if using python 2.7::
+
+      pip install nose
+      pip install mock
 
 
-Running tests by any means other than `matplotlib.test()`
-does not load the nose "knownfailureif" (Known failing tests) plugin,
-causing known-failing tests to fail for real.
+.. _`nosetest arguments`: http://nose.readthedocs.org/en/latest/usage.html
+
 
 Writing a simple test
 ---------------------
@@ -103,7 +156,8 @@ it::
   from matplotlib.testing.decorators import image_comparison
   import matplotlib.pyplot as plt
 
-  @image_comparison(baseline_images=['spines_axes_positions'])
+  @image_comparison(baseline_images=['spines_axes_positions'],
+                    extensions=['png'])
   def test_spines_axes_positions():
       # SF bug 2852168
       fig = plt.figure()
@@ -121,23 +175,28 @@ it::
 
 The first time this test is run, there will be no baseline image to
 compare against, so the test will fail.  Copy the output images (in
-this case `result_images/test_category/spines_axes_positions.*`) to
+this case `result_images/test_category/spines_axes_positions.png`) to
 the correct subdirectory of `baseline_images` tree in the source
 directory (in this case
-`lib/matplotlib/tests/baseline_images/test_category`).  Note carefully
-the `.*` at the end: this will copy only the images we need to include
-in the `git` repository.  The files ending in `_pdf.png` and
-`_svg.png` are converted from the `pdf` and `svg` originals on the fly
-and do not need to be in the respository.  Put these new files under
-source code revision control (with `git add`).  When rerunning the
-tests, they should now pass.
+`lib/matplotlib/tests/baseline_images/test_category`).  Put this new
+file under source code revision control (with `git add`).  When
+rerunning the tests, they should now pass.
+
+The :func:`~matplotlib.testing.decorators.image_comparison` decorator
+defaults to generating ``png``, ``pdf`` and ``svg`` output, but in
+interest of keeping the size of the library from ballooning we should only
+include the ``svg`` or ``pdf`` outputs if the test is explicitly exercising
+a feature dependent on that backend.
 
 There are two optional keyword arguments to the `image_comparison`
 decorator:
 
-   - `extensions`: If you only wish to test some of the image formats
-     (rather than the default `png`, `svg` and `pdf` formats), pass a
-     list of the extensions to test.
+   - `extensions`: If you only wish to test additional image formats
+     (rather than just `png`), pass any additional file types in the
+     list of the extensions to test.  When copying the new
+     baseline files be sure to only copy the output files, not their
+     conversions to ``png``.  For example only copy the files
+     ending in ``pdf``, not in ``_pdf.png``.
 
    - `tol`: This is the image matching tolerance, the default `1e-3`.
      If some variation is expected in the image between runs, this
@@ -177,19 +236,48 @@ to add tests for it in ``matplotlib.tests.test_whizbang``.  To add
 this module to the list of default tests, append its name to
 ``default_test_modules`` in :file:`lib/matplotlib/__init__.py`.
 
+Using Travis CI
+---------------
+
+`Travis CI <http://travis-ci.org/>`_ is a hosted CI system "in the
+cloud".
+
+Travis is configured to receive notifications of new commits to GitHub
+repos (via GitHub "service hooks") and to run builds or tests when it
+sees these new commits. It looks for a YAML file called
+``.travis.yml`` in the root of the repository to see how to test the
+project.
+
+Travis CI is already enabled for the `main matplotlib GitHub
+repository <https://github.com/matplotlib/matplotlib/>`_ -- for
+example, see `its Travis page
+<https://travis-ci.org/matplotlib/matplotlib>`_.
+
+If you want to enable Travis CI for your personal matplotlib GitHub
+repo, simply enable the repo to use Travis CI in either the Travis CI
+UI or the GitHub UI (Admin | Service Hooks). For details, see `the
+Travis CI Getting Started page
+<http://about.travis-ci.org/docs/user/getting-started/>`_.  This
+generally isn't necessary, since any pull request submitted against
+the main matplotlib repository will be tested.
+
+Once this is configured, you can see the Travis CI results at
+http://travis-ci.org/your_GitHub_user_name/matplotlib -- here's `an
+example <https://travis-ci.org/msabramo/matplotlib>`_.
+
+
 Using tox
 ---------
 
 `Tox <http://tox.testrun.org/>`_ is a tool for running tests against
 multiple Python environments, including multiple versions of Python
-(e.g., 2.6, 2.7, 3.2, etc.) and even different Python implementations
+(e.g., 2.7, 3.4, 3.5) and even different Python implementations
 altogether (e.g., CPython, PyPy, Jython, etc.)
 
-Testing all 4 versions of Python (2.6, 2.7, 3.1, and 3.2) requires
-having four versions of Python installed on your system and on the
+Testing all versions of Python (2.6, 2.7, 3.*) requires
+having multiple versions of Python installed on your system and on the
 PATH. Depending on your operating system, you may want to use your
-package manager (such as apt-get, yum or MacPorts) to do this, or use
-`pythonbrew <https://github.com/utahta/pythonbrew>`_.
+package manager (such as apt-get, yum or MacPorts) to do this.
 
 tox makes it easy to determine if your working copy introduced any
 regressions before submitting a pull request. Here's how to use it:
@@ -220,32 +308,3 @@ edit this file if you want to add new environments to test (e.g.,
 tests are run. For more info on the ``tox.ini`` file, see the `Tox
 Configuration Specification
 <http://tox.testrun.org/latest/config.html>`_.
-
-Using Travis CI
----------------
-
-`Travis CI <http://travis-ci.org/>`_ is a hosted CI system "in the
-cloud".
-
-Travis is configured to receive notifications of new commits to GitHub
-repos (via GitHub "service hooks") and to run builds or tests when it
-sees these new commits. It looks for a YAML file called
-``.travis.yml`` in the root of the repository to see how to test the
-project.
-
-Travis CI is already enabled for the `main matplotlib GitHub
-repository <https://github.com/matplotlib/matplotlib/>`_ -- for
-example, see `its Travis page
-<http://travis-ci.org/#!/matplotlib/matplotlib>`_.
-
-If you want to enable Travis CI for your personal matplotlib GitHub
-repo, simply enable the repo to use Travis CI in either the Travis CI
-UI or the GitHub UI (Admin | Service Hooks). For details, see `the
-Travis CI Getting Started page
-<http://about.travis-ci.org/docs/user/getting-started/>`_.  This
-generally isn't necessary, since any pull request submitted against
-the main matplotlib repository will be tested.
-
-Once this is configured, you can see the Travis CI results at
-http://travis-ci.org/#!/your_GitHub_user_name/matplotlib -- here's `an
-example <http://travis-ci.org/#!/msabramo/matplotlib>`_.

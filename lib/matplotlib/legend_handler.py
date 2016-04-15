@@ -27,14 +27,16 @@ derived from the base class (HandlerBase) with the following method.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import zip
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import zip
+from itertools import cycle
 
 import numpy as np
 
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 import matplotlib.collections as mcoll
+import matplotlib.colors as mcolors
 
 
 def update_from_first_child(tgt, src):
@@ -149,13 +151,14 @@ class HandlerNpoints(HandlerBase):
         if numpoints > 1:
             # we put some pad here to compensate the size of the
             # marker
-            xdata = np.linspace(-xdescent + self._marker_pad * fontsize,
-                                width - self._marker_pad * fontsize,
+            pad = self._marker_pad * fontsize
+            xdata = np.linspace(-xdescent + pad,
+                                -xdescent + width - pad,
                                 numpoints)
             xdata_marker = xdata
         elif numpoints == 1:
-            xdata = np.linspace(-xdescent, width, 2)
-            xdata_marker = [0.5 * width - 0.5 * xdescent]
+            xdata = np.linspace(-xdescent, -xdescent+width, 2)
+            xdata_marker = [-xdescent + 0.5 * width]
 
         return xdata, xdata_marker
 
@@ -304,8 +307,11 @@ class HandlerRegularPolyCollection(HandlerNpointsYoffsets):
     def get_sizes(self, legend, orig_handle,
                  xdescent, ydescent, width, height, fontsize):
         if self._sizes is None:
-            size_max = max(orig_handle.get_sizes()) * legend.markerscale ** 2
-            size_min = min(orig_handle.get_sizes()) * legend.markerscale ** 2
+            handle_sizes = orig_handle.get_sizes()
+            if not len(handle_sizes):
+                handle_sizes = [1]
+            size_max = max(handle_sizes) * legend.markerscale ** 2
+            size_min = min(handle_sizes) * legend.markerscale ** 2
 
             numpoints = self.get_numpoints(legend)
             if numpoints < 4:
@@ -495,6 +501,7 @@ class HandlerErrorbar(HandlerLine2D):
 
         return artists
 
+
 class HandlerStem(HandlerNpointsYoffsets):
     """
     Handler for Errorbars
@@ -561,9 +568,29 @@ class HandlerStem(HandlerNpointsYoffsets):
 
 class HandlerTuple(HandlerBase):
     """
-    Handler for Tuple
+    Handler for Tuple.
+
+    Additional kwargs are passed through to `HandlerBase`.
+
+    Parameters
+    ----------
+
+    ndivide : int, optional
+        The number of sections to divide the legend area into.  If None,
+        use the length of the input tuple. Default is 1.
+
+
+    pad : float, optional
+        If None, fall back to `legend.borderpad` as the default.
+        In units of fraction of font size. Default is None.
+
+
+
     """
-    def __init__(self, **kwargs):
+    def __init__(self, ndivide=1, pad=None, **kwargs):
+
+        self._ndivide = ndivide
+        self._pad = pad
         HandlerBase.__init__(self, **kwargs)
 
     def create_artists(self, legend, orig_handle,
@@ -571,13 +598,67 @@ class HandlerTuple(HandlerBase):
                        trans):
 
         handler_map = legend.get_legend_handler_map()
+
+        if self._ndivide is None:
+            ndivide = len(orig_handle)
+        else:
+            ndivide = self._ndivide
+
+        if self._pad is None:
+            pad = legend.borderpad * fontsize
+        else:
+            pad = self._pad * fontsize
+
+        if ndivide > 1:
+            width = (width - pad*(ndivide - 1)) / ndivide
+
+        xds = [xdescent - (width + pad) * i for i in range(ndivide)]
+        xds_cycle = cycle(xds)
+
         a_list = []
         for handle1 in orig_handle:
             handler = legend.get_legend_handler(handler_map, handle1)
             _a_list = handler.create_artists(legend, handle1,
-                                             xdescent, ydescent, width, height,
+                                             six.next(xds_cycle),
+                                             ydescent,
+                                             width, height,
                                              fontsize,
                                              trans)
             a_list.extend(_a_list)
 
         return a_list
+
+
+class HandlerPolyCollection(HandlerBase):
+    """
+    Handler for PolyCollection used in fill_between and stackplot.
+    """
+    def _update_prop(self, legend_handle, orig_handle):
+        def first_color(colors):
+            colors = mcolors.colorConverter.to_rgba_array(colors)
+            if len(colors):
+                return colors[0]
+            else:
+                return "none"
+        def get_first(prop_array):
+            if len(prop_array):
+                return prop_array[0]
+            else:
+                return None
+        legend_handle.set_edgecolor(first_color(orig_handle.get_edgecolor()))
+        legend_handle.set_facecolor(first_color(orig_handle.get_facecolor()))
+        legend_handle.set_fill(orig_handle.get_fill())
+        legend_handle.set_hatch(orig_handle.get_hatch())
+        legend_handle.set_linewidth(get_first(orig_handle.get_linewidths()))
+        legend_handle.set_linestyle(get_first(orig_handle.get_linestyles()))
+        legend_handle.set_transform(get_first(orig_handle.get_transforms()))
+        legend_handle.set_figure(orig_handle.get_figure())
+        legend_handle.set_alpha(orig_handle.get_alpha())
+
+    def create_artists(self, legend, orig_handle,
+                       xdescent, ydescent, width, height, fontsize, trans):
+        p = Rectangle(xy=(-xdescent, -ydescent),
+                      width=width, height=height)
+        self.update_prop(p, orig_handle, legend)
+        p.set_transform(trans)
+        return [p]

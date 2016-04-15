@@ -21,7 +21,7 @@ Naming Conventions
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 import os, sys, warnings, gzip
 
@@ -133,8 +133,8 @@ class RendererCairo(RendererBase):
         ctx.stroke()
 
     @staticmethod
-    def convert_path(ctx, path, transform):
-        for points, code in path.iter_segments(transform):
+    def convert_path(ctx, path, transform, clip=None):
+        for points, code in path.iter_segments(transform, clip=clip):
             if code == Path.MOVETO:
                 ctx.move_to(*points)
             elif code == Path.CLOSEPOLY:
@@ -150,16 +150,20 @@ class RendererCairo(RendererBase):
 
 
     def draw_path(self, gc, path, transform, rgbFace=None):
-        if len(path.vertices) > 18980:
-            raise ValueError("The Cairo backend can not draw paths longer than 18980 points.")
-
         ctx = gc.ctx
+
+        # We'll clip the path to the actual rendering extents
+        # if the path isn't filled.
+        if rgbFace is None and gc.get_hatch() is None:
+            clip = ctx.clip_extents()
+        else:
+            clip = None
 
         transform = transform + \
             Affine2D().scale(1.0, -1.0).translate(0, self.height)
 
         ctx.new_path()
-        self.convert_path(ctx, path, transform)
+        self.convert_path(ctx, path, transform, clip)
 
         self._fill_and_stroke(ctx, rgbFace, gc.get_alpha(), gc.get_forced_alpha())
 
@@ -167,23 +171,23 @@ class RendererCairo(RendererBase):
         # bbox - not currently used
         if _debug: print('%s.%s()' % (self.__class__.__name__, _fn_name()))
 
-        im.flipud_out()
-
-        rows, cols, buf = im.color_conv (BYTE_FORMAT)
-        surface = cairo.ImageSurface.create_for_data (
-                      buf, cairo.FORMAT_ARGB32, cols, rows, cols*4)
+        if sys.byteorder == 'little':
+            im = im[:, :, (2, 1, 0, 3)]
+        else:
+            im = im[:, :, (3, 0, 1, 2)]
+        surface = cairo.ImageSurface.create_for_data(
+            memoryview(im.flatten()), cairo.FORMAT_ARGB32, im.shape[1], im.shape[0],
+            im.shape[1]*4)
         ctx = gc.ctx
-        y = self.height - y - rows
+        y = self.height - y - im.shape[0]
 
         ctx.save()
-        ctx.set_source_surface (surface, x, y)
+        ctx.set_source_surface(surface, float(x), float(y))
         if gc.get_alpha() != 1.0:
             ctx.paint_with_alpha(gc.get_alpha())
         else:
             ctx.paint()
         ctx.restore()
-
-        im.flipud_out()
 
     def draw_text(self, gc, x, y, s, prop, angle, ismath=False, mtext=None):
         # Note: x,y are device/display coords, not user-coords, unlike other
@@ -242,7 +246,7 @@ class RendererCairo(RendererBase):
 
             size = fontsize * self.dpi / 72.0
             ctx.set_font_size(size)
-            if isinstance(s, six.text_type):
+            if not six.PY3 and isinstance(s, six.text_type):
                 s = s.encode("utf-8")
             ctx.show_text(s)
             ctx.restore()
@@ -359,7 +363,7 @@ class GraphicsContextCairo(GraphicsContextBase):
         if not rectangle: return
         x,y,w,h = rectangle.bounds
         # pixel-aligned clip-regions are faster
-        x,y,w,h = round(x), round(y), round(w), round(h)
+        x,y,w,h = np.round(x), np.round(y), np.round(w), np.round(h)
         ctx = self.ctx
         ctx.new_path()
         ctx.rectangle (x, self.renderer.height - h - y, w, h)
@@ -397,6 +401,8 @@ class GraphicsContextCairo(GraphicsContextBase):
         else:
             self.ctx.set_source_rgba(*self._rgb)
 
+    def get_rgb(self):
+        return self.ctx.get_source().get_rgba()[:3]
 
     def set_joinstyle(self, js):
         if js in ('miter', 'round', 'bevel'):
@@ -407,7 +413,7 @@ class GraphicsContextCairo(GraphicsContextBase):
 
 
     def set_linewidth(self, w):
-        self._linewidth = w
+        self._linewidth = float(w)
         self.ctx.set_line_width (self.renderer.points_to_pixels(w))
 
 
@@ -482,21 +488,14 @@ class FigureCanvasCairo (FigureCanvasBase):
                 raise RuntimeError ('cairo has not been compiled with SVG '
                                     'support enabled')
             if format == 'svgz':
-                filename = fo
                 if is_string_like(fo):
-                    fo = open(fo, 'wb')
-                    close = True
+                    fo = gzip.GzipFile(fo, 'wb')
                 else:
-                    close = False
-                try:
                     fo = gzip.GzipFile(None, 'wb', fileobj=fo)
-                finally:
-                    if close:
-                        fo.close()
             surface = cairo.SVGSurface (fo, width_in_points, height_in_points)
         else:
-           warnings.warn ("unknown format: %s" % format)
-           return
+            warnings.warn ("unknown format: %s" % format)
+            return
 
         # surface.set_dpi() can be used
         renderer = RendererCairo (self.figure.dpi)
@@ -530,6 +529,8 @@ class FigureCanvasCairo (FigureCanvasBase):
 
         ctx.show_page()
         surface.finish()
+        if format == 'svgz':
+            fo.close()
 
 
 FigureCanvas = FigureCanvasCairo

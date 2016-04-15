@@ -15,8 +15,8 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import xrange
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import xrange
 
 import os, sys
 
@@ -178,7 +178,7 @@ class PlotView(NibClassBuilder.AutoBaseClass):
     def windowDidResize_(self, sender):
         w,h = self.bounds().size
         dpi = self.canvas.figure.dpi
-        self.canvas.figure.set_size_inches(w / dpi, h / dpi)
+        self.canvas.figure.set_size_inches(w / dpi, h / dpi, forward=False)
         self.canvas.draw()
         self.updatePlot()
 

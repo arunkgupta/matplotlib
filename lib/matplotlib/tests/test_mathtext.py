@@ -1,16 +1,18 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
+
+import io
 
 import numpy as np
 import matplotlib
-from matplotlib.testing.decorators import image_comparison, knownfailureif
+from matplotlib.testing.decorators import image_comparison, knownfailureif, cleanup
 import matplotlib.pyplot as plt
 from matplotlib import mathtext
 
 math_tests = [
-    r'$a+b+\dots+\dot{s}+\ldots$',
+    r'$a+b+\dot s+\dot{s}+\ldots$',
     r'$x \doteq y$',
     r'\$100.00 $\alpha \_$',
     r'$\frac{\$100.00}{y}$',
@@ -41,7 +43,7 @@ math_tests = [
     r"$\gamma = \frac{x=\frac{6}{8}}{y} \delta$",
     r'$\limsup_{x\to\infty}$',
     r'$\oint^\infty_0$',
-    r"$f'$",
+    r"$f'\quad f'''(x)\quad ''/\mathrm{yr}$",
     r'$\frac{x_2888}{y}$',
     r"$\sqrt[3]{\frac{X_2}{Y}}=5$",
     r"$\sqrt[5]{\prod^\frac{x}{2\pi^2}_\infty}$",
@@ -90,7 +92,20 @@ math_tests = [
     r"$\left(2 \, a=b\right)$", # Sage bug #8125
     r"$? ! &$", # github issue #466
     r'$\operatorname{cos} x$', # github issue #553
-    r'$\sum _{\genfrac{}{}{0}{}{0\leq i\leq m}{0<j<n}}P\left(i,j\right)$'
+    r'$\sum _{\genfrac{}{}{0}{}{0\leq i\leq m}{0<j<n}}P\left(i,j\right)$',
+    r"$\left\Vert a \right\Vert \left\vert b \right\vert \left| a \right| \left\| b\right\| \Vert a \Vert \vert b \vert$",
+    r'$\mathring{A}  \stackrel{\circ}{A}  \AA$',
+    r'$M \, M \thinspace M \/ M \> M \: M \; M \ M \enspace M \quad M \qquad M \! M$',
+    r'$\Cup$ $\Cap$ $\leftharpoonup$ $\barwedge$ $\rightharpoonup$',
+    r'$\dotplus$ $\doteq$ $\doteqdot$ $\ddots$',
+    r'$xyz^kx_kx^py^{p-2} d_i^jb_jc_kd x^j_i E^0 E^0_u$', # github issue #4873
+    r'${xyz}^k{x}_{k}{x}^{p}{y}^{p-2} {d}_{i}^{j}{b}_{j}{c}_{k}{d} {x}^{j}_{i}{E}^{0}{E}^0_u$',
+    r'${\int}_x^x x\oint_x^x x\int_{X}^{X}x\int_x x \int^x x \int_{x} x\int^{x}{\int}_{x} x{\int}^{x}_{x}x$',
+    r'testing$^{123}$',
+    ' '.join('$\\' + p + '$' for p in sorted(mathtext.Parser._snowflake)),
+    r'$6-2$; $-2$; $ -2$; ${-2}$; ${  -2}$; $20^{+3}_{-2}$',
+    r'$\overline{\omega}^x \frac{1}{2}_0^x$', # github issue #5444
+    r'$,$ $.$ $1{,}234{, }567{ , }890$ and $1,234,567,890$', # github issue 5799
 ]
 
 digits = "0123456789"
@@ -143,8 +158,7 @@ for fonts, chars in font_test_specs:
 
 def make_set(basename, fontset, tests, extensions=None):
     def make_test(filename, test):
-        @image_comparison(baseline_images=[filename], extensions=extensions,
-                          tol=32)
+        @image_comparison(baseline_images=[filename], extensions=extensions)
         def single_test():
             matplotlib.rcParams['mathtext.fontset'] = fontset
             fig = plt.figure(figsize=(5.25, 0.75))
@@ -164,15 +178,19 @@ def make_set(basename, fontset, tests, extensions=None):
 make_set('mathtext', 'cm', math_tests)
 make_set('mathtext', 'stix', math_tests)
 make_set('mathtext', 'stixsans', math_tests)
+make_set('mathtext', 'dejavusans', math_tests)
+make_set('mathtext', 'dejavuserif', math_tests)
 
 make_set('mathfont', 'cm', font_tests, ['png'])
 make_set('mathfont', 'stix', font_tests, ['png'])
 make_set('mathfont', 'stixsans', font_tests, ['png'])
+make_set('mathfont', 'dejavusans', font_tests, ['png'])
+make_set('mathfont', 'dejavuserif', font_tests, ['png'])
 
 def test_fontinfo():
     import matplotlib.font_manager as font_manager
     import matplotlib.ft2font as ft2font
-    fontpath = font_manager.findfont("Bitstream Vera Sans")
+    fontpath = font_manager.findfont("DejaVu Sans")
     font = ft2font.FT2Font(fontpath)
     table = font.get_sfnt_table("head")
     assert table['version'] == (1, 0)
@@ -206,10 +224,25 @@ def test_mathtext_exceptions():
             parser.parse(math)
         except ValueError as e:
             exc = str(e).split('\n')
-            print(e)
             assert exc[3].startswith(msg)
         else:
             assert False, "Expected '%s', but didn't get it" % msg
+
+@cleanup
+def test_single_minus_sign():
+    plt.figure(figsize=(0.3, 0.3))
+    plt.text(0.5, 0.5, '$-$')
+    for spine in plt.gca().spines.values():
+        spine.set_visible(False)
+    plt.gca().set_xticks([])
+    plt.gca().set_yticks([])
+
+    buff = io.BytesIO()
+    plt.savefig(buff, format="rgba", dpi=1000)
+    array = np.fromstring(buff.getvalue(), dtype=np.uint8)
+
+    # If this fails, it would be all white
+    assert not np.all(array == 0xff)
 
 
 if __name__ == '__main__':

@@ -1,14 +1,18 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+import itertools
+from weakref import ref
+import warnings
 
-import six
+from matplotlib.externals import six
 
 from datetime import datetime
 
 import numpy as np
 from numpy.testing.utils import (assert_array_equal, assert_approx_equal,
                                  assert_array_almost_equal)
-from nose.tools import assert_equal, raises, assert_true
+from nose.tools import (assert_equal, assert_not_equal, raises, assert_true,
+                        assert_raises)
 
 import matplotlib.cbook as cbook
 import matplotlib.colors as mcolors
@@ -25,6 +29,31 @@ def test_is_string_like():
 
     assert cbook.is_string_like("hello world")
     assert_equal(cbook.is_string_like(10), False)
+
+    y = ['a', 'b', 'c']
+    assert_equal(cbook.is_string_like(y), False)
+
+    y = np.array(y)
+    assert_equal(cbook.is_string_like(y), False)
+
+    y = np.array(y, dtype=object)
+    assert cbook.is_string_like(y)
+
+
+def test_is_sequence_of_strings():
+    y = ['a', 'b', 'c']
+    assert cbook.is_sequence_of_strings(y)
+
+    y = np.array(y, dtype=object)
+    assert cbook.is_sequence_of_strings(y)
+
+
+def test_is_hashable():
+    s = 'string'
+    assert cbook.is_hashable(s)
+
+    lst = ['list', 'of', 'stings']
+    assert not cbook.is_hashable(lst)
 
 
 def test_restrict_dict():
@@ -43,7 +72,7 @@ def test_restrict_dict():
     assert_equal(d, {'foo': 'bar', 1: 2})
 
 
-class Test_delete_masked_points:
+class Test_delete_masked_points(object):
     def setUp(self):
         self.mask1 = [False, False, True, True, False, False]
         self.arr0 = np.arange(1.0, 7.0)
@@ -95,7 +124,7 @@ def test_allequal():
     assert(not cbook.allequal(('a', 'b')))
 
 
-class Test_boxplot_stats:
+class Test_boxplot_stats(object):
     def setup(self):
         np.random.seed(937)
         self.nrows = 37
@@ -121,8 +150,7 @@ class Test_boxplot_stats:
             'q1': 1.3597529879465153,
             'q3': 14.85246294739361,
             'whishi': 27.899688243699629,
-            'whislo': 0.042143774965502923,
-            'label': 0
+            'whislo': 0.042143774965502923
         }
 
         self.known_bootstrapped_ci = {
@@ -134,10 +162,6 @@ class Test_boxplot_stats:
             'whishi': 42.232049135969874,
             'whislo': 0.042143774965502923,
             'fliers': np.array([92.55467075, 87.03819018]),
-        }
-
-        self.known_res_with_labels = {
-            'label': 'Test1'
         }
 
         self.known_res_percentiles = {
@@ -229,11 +253,15 @@ class Test_boxplot_stats:
             )
 
     def test_results_withlabels(self):
-        labels = ['Test1', 2, 3, 4]
+        labels = ['Test1', 2, 'ardvark', 4]
         results = cbook.boxplot_stats(self.data, labels=labels)
         res = results[0]
-        for key in list(self.known_res_with_labels.keys()):
-            assert_equal(res[key], self.known_res_with_labels[key])
+        for lab, res in zip(labels, results):
+            assert_equal(res['label'], lab)
+
+        results = cbook.boxplot_stats(self.data)
+        for res in results:
+            assert('label' not in res)
 
     @raises(ValueError)
     def test_label_error(self):
@@ -244,3 +272,230 @@ class Test_boxplot_stats:
     def test_bad_dims(self):
         data = np.random.normal(size=(34, 34, 34))
         results = cbook.boxplot_stats(data)
+
+    def test_boxplot_stats_autorange_false(self):
+        x = np.zeros(shape=140)
+        x = np.hstack([-25, x, 25])
+        bstats_false = cbook.boxplot_stats(x, autorange=False)
+        bstats_true = cbook.boxplot_stats(x, autorange=True)
+
+        assert_equal(bstats_false[0]['whislo'], 0)
+        assert_equal(bstats_false[0]['whishi'], 0)
+        assert_array_almost_equal(bstats_false[0]['fliers'], [-25, 25])
+
+        assert_equal(bstats_true[0]['whislo'], -25)
+        assert_equal(bstats_true[0]['whishi'], 25)
+        assert_array_almost_equal(bstats_true[0]['fliers'], [])
+
+
+class Test_callback_registry(object):
+    def setup(self):
+        self.signal = 'test'
+        self.callbacks = cbook.CallbackRegistry()
+
+    def connect(self, s, func):
+        return self.callbacks.connect(s, func)
+
+    def is_empty(self):
+        assert_equal(self.callbacks._func_cid_map, {})
+        assert_equal(self.callbacks.callbacks, {})
+
+    def is_not_empty(self):
+        assert_not_equal(self.callbacks._func_cid_map, {})
+        assert_not_equal(self.callbacks.callbacks, {})
+
+    def test_callback_complete(self):
+        # ensure we start with an empty registry
+        self.is_empty()
+
+        # create a class for testing
+        mini_me = Test_callback_registry()
+
+        # test that we can add a callback
+        cid1 = self.connect(self.signal, mini_me.dummy)
+        assert_equal(type(cid1), int)
+        self.is_not_empty()
+
+        # test that we don't add a second callback
+        cid2 = self.connect(self.signal, mini_me.dummy)
+        assert_equal(cid1, cid2)
+        self.is_not_empty()
+        assert_equal(len(self.callbacks._func_cid_map), 1)
+        assert_equal(len(self.callbacks.callbacks), 1)
+
+        del mini_me
+
+        # check we now have no callbacks registered
+        self.is_empty()
+
+    def dummy(self):
+        pass
+
+
+def _kwarg_norm_helper(inp, expected, kwargs_to_norm, warn_count=0):
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        assert expected == cbook.normalize_kwargs(inp, **kwargs_to_norm)
+        assert len(w) == warn_count
+
+
+def _kwarg_norm_fail_helper(inp, kwargs_to_norm):
+    assert_raises(TypeError, cbook.normalize_kwargs, inp, **kwargs_to_norm)
+
+
+def test_normalize_kwargs():
+    fail_mapping = (
+        ({'a': 1}, {'forbidden': ('a')}),
+        ({'a': 1}, {'required': ('b')}),
+        ({'a': 1, 'b': 2}, {'required': ('a'), 'allowed': ()})
+    )
+
+    for inp, kwargs in fail_mapping:
+        yield _kwarg_norm_fail_helper, inp, kwargs
+
+    warn_passing_mapping = (
+        ({'a': 1, 'b': 2}, {'a': 1}, {'alias_mapping': {'a': ['b']}}, 1),
+        ({'a': 1, 'b': 2}, {'a': 1}, {'alias_mapping': {'a': ['b']},
+                                      'allowed': ('a',)}, 1),
+        ({'a': 1, 'b': 2}, {'a': 2}, {'alias_mapping': {'a': ['a', 'b']}}, 1),
+
+        ({'a': 1, 'b': 2, 'c': 3}, {'a': 1, 'c': 3},
+         {'alias_mapping': {'a': ['b']}, 'required': ('a', )}, 1),
+
+    )
+
+    for inp, exp, kwargs, wc in warn_passing_mapping:
+        yield _kwarg_norm_helper, inp, exp, kwargs, wc
+
+    pass_mapping = (
+        ({'a': 1, 'b': 2}, {'a': 1, 'b': 2}, {}),
+        ({'b': 2}, {'a': 2}, {'alias_mapping': {'a': ['a', 'b']}}),
+        ({'b': 2}, {'a': 2}, {'alias_mapping': {'a': ['b']},
+                              'forbidden': ('b', )}),
+
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'required': ('a', ),
+                                              'allowed': ('c', )}),
+
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'required': ('a', 'c'),
+                                              'allowed': ('c', )}),
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'required': ('a', 'c'),
+                                              'allowed': ('a', 'c')}),
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'required': ('a', 'c'),
+                                              'allowed': ()}),
+
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'required': ('a', 'c')}),
+        ({'a': 1, 'c': 3}, {'a': 1, 'c': 3}, {'allowed': ('a', 'c')}),
+
+    )
+
+    for inp, exp, kwargs in pass_mapping:
+        yield _kwarg_norm_helper, inp, exp, kwargs
+
+
+def test_to_prestep():
+    x = np.arange(4)
+    y1 = np.arange(4)
+    y2 = np.arange(4)[::-1]
+
+    xs, y1s, y2s = cbook.pts_to_prestep(x, y1, y2)
+
+    x_target = np.asarray([0, 0, 1, 1, 2, 2, 3], dtype='float')
+    y1_target = np.asarray([0, 1, 1, 2, 2, 3, 3], dtype='float')
+    y2_target = np.asarray([3, 2, 2, 1, 1, 0, 0], dtype='float')
+
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+    assert_array_equal(y2_target, y2s)
+
+    xs, y1s = cbook.pts_to_prestep(x, y1)
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+
+
+def test_to_poststep():
+    x = np.arange(4)
+    y1 = np.arange(4)
+    y2 = np.arange(4)[::-1]
+
+    xs, y1s, y2s = cbook.pts_to_poststep(x, y1, y2)
+
+    x_target = np.asarray([0, 1, 1, 2, 2, 3, 3], dtype='float')
+    y1_target = np.asarray([0, 0, 1, 1, 2, 2, 3], dtype='float')
+    y2_target = np.asarray([3, 3, 2, 2, 1, 1, 0], dtype='float')
+
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+    assert_array_equal(y2_target, y2s)
+
+    xs, y1s = cbook.pts_to_poststep(x, y1)
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+
+
+def test_to_midstep():
+    x = np.arange(4)
+    y1 = np.arange(4)
+    y2 = np.arange(4)[::-1]
+
+    xs, y1s, y2s = cbook.pts_to_midstep(x, y1, y2)
+
+    x_target = np.asarray([0, .5, .5, 1.5, 1.5, 2.5, 2.5, 3], dtype='float')
+    y1_target = np.asarray([0, 0, 1, 1, 2, 2, 3, 3], dtype='float')
+    y2_target = np.asarray([3, 3, 2, 2, 1, 1, 0, 0], dtype='float')
+
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+    assert_array_equal(y2_target, y2s)
+
+    xs, y1s = cbook.pts_to_midstep(x, y1)
+    assert_array_equal(x_target, xs)
+    assert_array_equal(y1_target, y1s)
+
+
+def test_step_fails():
+    assert_raises(ValueError, cbook._step_validation,
+                  np.arange(12).reshape(3, 4), 'a')
+    assert_raises(ValueError, cbook._step_validation,
+                  np.arange(12), 'a')
+    assert_raises(ValueError, cbook._step_validation,
+                  np.arange(12))
+    assert_raises(ValueError, cbook._step_validation,
+                  np.arange(12), np.arange(3))
+
+
+def test_grouper():
+    class dummy():
+        pass
+    a, b, c, d, e = objs = [dummy() for j in range(5)]
+    g = cbook.Grouper()
+    g.join(*objs)
+    assert set(list(g)[0]) == set(objs)
+    assert set(g.get_siblings(a)) == set(objs)
+
+    for other in objs[1:]:
+        assert g.joined(a, other)
+
+    g.remove(a)
+    for other in objs[1:]:
+        assert not g.joined(a, other)
+
+    for A, B in itertools.product(objs[1:], objs[1:]):
+        assert g.joined(A, B)
+
+
+def test_grouper_private():
+    class dummy():
+        pass
+    objs = [dummy() for j in range(5)]
+    g = cbook.Grouper()
+    g.join(*objs)
+    # reach in and touch the internals !
+    mapping = g._mapping
+
+    for o in objs:
+        assert ref(o) in mapping
+
+    base_set = mapping[ref(objs[0])]
+    for o in objs[1:]:
+        assert mapping[ref(o)] is base_set

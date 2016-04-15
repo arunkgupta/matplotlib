@@ -1,9 +1,11 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 import functools
+import gc
+import inspect
 import os
 import sys
 import shutil
@@ -13,12 +15,15 @@ import unittest
 import nose
 import numpy as np
 
-import matplotlib.tests
+import matplotlib as mpl
+import matplotlib.style
 import matplotlib.units
+import matplotlib.testing
 from matplotlib import cbook
 from matplotlib import ticker
 from matplotlib import pyplot as plt
 from matplotlib import ft2font
+from matplotlib import rcParams
 from matplotlib.testing.noseclasses import KnownFailureTest, \
      KnownFailureDidNotFailTest, ImageComparisonFailure
 from matplotlib.testing.compare import comparable_formats, compare_images, \
@@ -65,20 +70,28 @@ def knownfailureif(fail_condition, msg=None, known_exception_class=None ):
     return known_fail_decorator
 
 
+def _do_cleanup(original_units_registry, original_settings):
+    plt.close('all')
+    gc.collect()
+
+    mpl.rcParams.clear()
+    mpl.rcParams.update(original_settings)
+    matplotlib.units.registry.clear()
+    matplotlib.units.registry.update(original_units_registry)
+    warnings.resetwarnings()  # reset any warning filters set in tests
+
+
 class CleanupTest(object):
     @classmethod
     def setup_class(cls):
         cls.original_units_registry = matplotlib.units.registry.copy()
+        cls.original_settings = mpl.rcParams.copy()
+        matplotlib.testing.setup()
 
     @classmethod
     def teardown_class(cls):
-        plt.close('all')
-
-        matplotlib.tests.setup()
-
-        matplotlib.units.registry.clear()
-        matplotlib.units.registry.update(cls.original_units_registry)
-        warnings.resetwarnings()  # reset any warning filters set in tests
+        _do_cleanup(cls.original_units_registry,
+                    cls.original_settings)
 
     def test(self):
         self._func()
@@ -90,33 +103,65 @@ class CleanupTestCase(unittest.TestCase):
     def setUpClass(cls):
         import matplotlib.units
         cls.original_units_registry = matplotlib.units.registry.copy()
+        cls.original_settings = mpl.rcParams.copy()
 
     @classmethod
     def tearDownClass(cls):
-        plt.close('all')
-
-        matplotlib.tests.setup()
-
-        matplotlib.units.registry.clear()
-        matplotlib.units.registry.update(cls.original_units_registry)
-        warnings.resetwarnings()  # reset any warning filters set in tests
+        _do_cleanup(cls.original_units_registry,
+                    cls.original_settings)
 
 
-def cleanup(func):
-    @functools.wraps(func)
-    def wrapped_function(*args, **kwargs):
-        original_units_registry = matplotlib.units.registry.copy()
-        try:
-            func(*args, **kwargs)
-        finally:
-            plt.close('all')
+def cleanup(style=None):
+    """
+    A decorator to ensure that any global state is reset before
+    running a test.
 
-            matplotlib.tests.setup()
+    Parameters
+    ----------
+    style : str, optional
+        The name of the style to apply.
+    """
 
-            matplotlib.units.registry.clear()
-            matplotlib.units.registry.update(original_units_registry)
-            warnings.resetwarnings() #reset any warning filters set in tests
-    return wrapped_function
+    # If cleanup is used without arguments, `style` will be a
+    # callable, and we pass it directly to the wrapper generator.  If
+    # cleanup if called with an argument, it is a string naming a
+    # style, and the function will be passed as an argument to what we
+    # return.  This is a confusing, but somewhat standard, pattern for
+    # writing a decorator with optional arguments.
+
+    def make_cleanup(func):
+        if inspect.isgeneratorfunction(func):
+            @functools.wraps(func)
+            def wrapped_callable(*args, **kwargs):
+                original_units_registry = matplotlib.units.registry.copy()
+                original_settings = mpl.rcParams.copy()
+                matplotlib.style.use(style)
+                try:
+                    for yielded in func(*args, **kwargs):
+                        yield yielded
+                finally:
+                    _do_cleanup(original_units_registry,
+                                original_settings)
+        else:
+            @functools.wraps(func)
+            def wrapped_callable(*args, **kwargs):
+                original_units_registry = matplotlib.units.registry.copy()
+                original_settings = mpl.rcParams.copy()
+                matplotlib.style.use(style)
+                try:
+                    func(*args, **kwargs)
+                finally:
+                    _do_cleanup(original_units_registry,
+                                original_settings)
+
+        return wrapped_callable
+
+    if isinstance(style, six.string_types):
+        return make_cleanup
+    else:
+        result = make_cleanup(style)
+        style = 'classic'
+        return result
 
 
 def check_freetype_version(ver):
@@ -135,8 +180,21 @@ class ImageComparisonTest(CleanupTest):
     @classmethod
     def setup_class(cls):
         CleanupTest.setup_class()
-
+        cls._initial_settings = mpl.rcParams.copy()
+        try:
+            matplotlib.style.use(cls._style)
+        except:
+            # Restore original settings before raising errors during the update.
+            mpl.rcParams.clear()
+            mpl.rcParams.update(cls._initial_settings)
+            raise
+        cls.original_settings = cls._initial_settings
+        matplotlib.testing.set_font_settings_for_testing()
         cls._func()
+
+    @classmethod
+    def teardown_class(cls):
+        CleanupTest.teardown_class()
 
     @staticmethod
     def remove_text(figure):
@@ -157,8 +215,6 @@ class ImageComparisonTest(CleanupTest):
         baseline_dir, result_dir = _image_directories(self._func)
 
         for fignum, baseline in zip(plt.get_fignums(), self._baseline_images):
-            figure = plt.figure(fignum)
-
             for extension in self._extensions:
                 will_fail = not extension in comparable_formats()
                 if will_fail:
@@ -182,6 +238,8 @@ class ImageComparisonTest(CleanupTest):
                     will_fail, fail_msg,
                     known_exception_class=ImageComparisonFailure)
                 def do_test():
+                    figure = plt.figure(fignum)
+
                     if self._remove_text:
                         self.remove_text(figure)
 
@@ -208,9 +266,9 @@ class ImageComparisonTest(CleanupTest):
 
                 yield (do_test,)
 
-def image_comparison(baseline_images=None, extensions=None, tol=13,
+def image_comparison(baseline_images=None, extensions=None, tol=0,
                      freetype_version=None, remove_text=False,
-                     savefig_kwarg=None):
+                     savefig_kwarg=None, style='classic'):
     """
     call signature::
 
@@ -232,7 +290,7 @@ def image_comparison(baseline_images=None, extensions=None, tol=13,
 
         Otherwise, a list of extensions to test. For example ['png','pdf'].
 
-      *tol*: (default 13)
+      *tol*: (default 0)
         The RMS threshold above which the test is considered failed.
 
       *freetype_version*: str or tuple
@@ -247,8 +305,12 @@ def image_comparison(baseline_images=None, extensions=None, tol=13,
       *savefig_kwarg*: dict
         Optional arguments that are passed to the savefig method.
 
-    """
+      *style*: string
+        Optional name for the base style to apply to the image
+        test. The test itself can also apply additional styles
+        if desired. Defaults to the 'classic' style.
 
+    """
     if baseline_images is None:
         raise ValueError('baseline_images must be specified')
 
@@ -284,7 +346,8 @@ def image_comparison(baseline_images=None, extensions=None, tol=13,
              '_tol': tol,
              '_freetype_version': freetype_version,
              '_remove_text': remove_text,
-             '_savefig_kwarg': savefig_kwarg})
+             '_savefig_kwarg': savefig_kwarg,
+             '_style': style})
 
         return new_class
     return compare_images_decorator
@@ -303,20 +366,38 @@ def _image_directories(func):
         subdir = os.path.splitext(os.path.split(script_name)[1])[0]
     else:
         mods = module_name.split('.')
-        mods.pop(0) # <- will be the name of the package being tested (in
-                    # most cases "matplotlib")
-        assert mods.pop(0) == 'tests'
+        if len(mods) >= 3:
+            mods.pop(0)
+            # mods[0] will be the name of the package being tested (in
+            # most cases "matplotlib") However if this is a
+            # namespace package pip installed and run via the nose
+            # multiprocess plugin or as a specific test this may be
+            # missing. See https://github.com/matplotlib/matplotlib/issues/3314
+        if mods.pop(0) != 'tests':
+            warnings.warn(("Module '%s' does not live in a parent module "
+                "named 'tests'. This is probably ok, but we may not be able "
+                "to guess the correct subdirectory containing the baseline "
+                "images. If things go wrong please make sure that there is "
+                "a parent directory named 'tests' and that it contains a "
+                "__init__.py file (can be empty).") % module_name)
         subdir = os.path.join(*mods)
 
         import imp
         def find_dotted_module(module_name, path=None):
-            """A version of imp which can handle dots in the module name"""
+            """A version of imp which can handle dots in the module name.
+               As for imp.find_module(), the return value is a 3-element
+               tuple (file, pathname, description)."""
             res = None
             for sub_mod in module_name.split('.'):
-                res = file, path, _ = imp.find_module(sub_mod, path)
-                path = [path]
-                if file is not None:
-                    file.close()
+                try:
+                    res = file, path, _ = imp.find_module(sub_mod, path)
+                    path = [path]
+                    if file is not None:
+                        file.close()
+                except ImportError:
+                    # assume namespace package
+                    path = sys.modules[sub_mod].__path__
+                    res = None, path, None
             return res
 
         mod_file = find_dotted_module(func.__module__)[1]
@@ -329,3 +410,40 @@ def _image_directories(func):
         cbook.mkdirs(result_dir)
 
     return baseline_dir, result_dir
+
+
+def switch_backend(backend):
+    def switch_backend_decorator(func):
+        def backend_switcher(*args, **kwargs):
+            try:
+                prev_backend = mpl.get_backend()
+                matplotlib.testing.setup()
+                plt.switch_backend(backend)
+                result = func(*args, **kwargs)
+            finally:
+                plt.switch_backend(prev_backend)
+            return result
+
+        return nose.tools.make_decorator(func)(backend_switcher)
+    return switch_backend_decorator
+
+
+def skip_if_command_unavailable(cmd):
+    """
+    skips a test if a command is unavailable.
+
+    Parameters
+    ----------
+    cmd : list of str
+        must be a complete command which should not
+        return a non zero exit code, something like
+        ["latex", "-version"]
+    """
+    from matplotlib.compat.subprocess import check_output
+    try:
+        check_output(cmd)
+    except:
+        from nose import SkipTest
+        raise SkipTest('missing command: %s' % cmd[0])
+
+    return lambda f: f

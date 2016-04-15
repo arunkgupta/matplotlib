@@ -13,14 +13,13 @@ in Donald Knuth's TeX, so the quality is quite good (matplotlib also
 provides a ``usetex`` option for those who do want to call out to TeX
 to generate their text (see :ref:`usetex-tutorial`).
 
-Any text element can use math text.  You should use raw strings
-(precede the quotes with an ``'r'``), and surround the math text with
-dollar signs ($), as in TeX.  Regular text and mathtext can be
-interleaved within the same string.  Mathtext can use the Computer
-Modern fonts (from (La)TeX), `STIX <http://www.aip.org/stixfonts/>`_
-fonts (with are designed to blend well with Times) or a Unicode font
-that you provide.  The mathtext font can be selected with the
-customization variable ``mathtext.fontset`` (see
+Any text element can use math text.  You should use raw strings (precede the
+quotes with an ``'r'``), and surround the math text with dollar signs ($), as in
+TeX. Regular text and mathtext can be interleaved within the same string.
+Mathtext can use DejaVu Sans (default), DejaVu Serif, the Computer Modern fonts
+(from (La)TeX), `STIX <http://www.aip.org/stixfonts/>`_ fonts (with are designed
+to blend well with Times), or a Unicode font that you provide.  The mathtext
+font can be selected with the customization variable ``mathtext.fontset`` (see
 :ref:`customizing-matplotlib`)
 
 .. note::
@@ -161,7 +160,7 @@ The default font is *italics* for mathematical symbols.
    This is useful, for example, to use the same font as regular
    non-math text for math text, by setting it to ``regular``.
 
-To change fonts, eg, to write "sin" in a Roman font, enclose the text
+To change fonts, e.g., to write "sin" in a Roman font, enclose the text
 in a font command::
 
     r'$s(t) = \mathcal{A}\mathrm{sin}(2 \omega t)$'

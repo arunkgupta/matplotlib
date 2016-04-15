@@ -5,8 +5,8 @@ A PostScript backend, which can produce both PostScript .ps and .eps
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import StringIO
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import StringIO
 
 import glob, math, os, shutil, sys, time
 def _fn_name(): return sys._getframe(1).f_code.co_name
@@ -26,16 +26,16 @@ from matplotlib.backend_bases import RendererBase, GraphicsContextBase,\
 
 from matplotlib.cbook import is_string_like, get_realpath_and_stat, \
     is_writable_file_like, maxdict, file_requires_unicode
-from matplotlib.mlab import quad2cubic
 from matplotlib.figure import Figure
 
-from matplotlib.font_manager import findfont, is_opentype_cff_font
-from matplotlib.ft2font import FT2Font, KERNING_DEFAULT, LOAD_NO_HINTING
+from matplotlib.font_manager import findfont, is_opentype_cff_font, get_font
+from matplotlib.ft2font import KERNING_DEFAULT, LOAD_NO_HINTING
 from matplotlib.ttconv import convert_ttf_to_ps
 from matplotlib.mathtext import MathTextParser
 from matplotlib._mathtext_data import uni2type1
 from matplotlib.text import Text
 from matplotlib.path import Path
+from matplotlib import _path
 from matplotlib.transforms import Affine2D
 
 from matplotlib.backends.backend_mixed import MixedModeRenderer
@@ -55,6 +55,7 @@ else: cmd_split = ';'
 backend_version = 'Level II'
 
 debugPS = 0
+
 
 class PsBackendHelper(object):
 
@@ -78,7 +79,6 @@ class PsBackendHelper(object):
         self._cached["gs_exe"] = gs_exe
         return gs_exe
 
-
     @property
     def gs_version(self):
         """
@@ -90,14 +90,18 @@ class PsBackendHelper(object):
             pass
 
         from matplotlib.compat.subprocess import Popen, PIPE
-        pipe = Popen(self.gs_exe + " --version",
-                     shell=True, stdout=PIPE).stdout
+        s = Popen(self.gs_exe + " --version",
+                     shell=True, stdout=PIPE)
+        pipe, stderr = s.communicate()
         if six.PY3:
-            ver = pipe.read().decode('ascii')
+            ver = pipe.decode('ascii')
         else:
-            ver = pipe.read()
-        gs_version = tuple(map(int, ver.strip().split(".")))
-
+            ver = pipe
+        try:
+            gs_version = tuple(map(int, ver.strip().split(".")))
+        except ValueError:
+            # if something went wrong parsing return null version number
+            gs_version = (0, 0)
         self._cached["gs_version"] = gs_version
         return gs_version
 
@@ -195,7 +199,6 @@ class RendererPS(RendererBase):
     context instance that controls the colors/styles.
     """
 
-    fontd = maxdict(50)
     afmfontd = maxdict(50)
 
     def __init__(self, width, height, pswriter, imagedpi=72):
@@ -255,6 +258,7 @@ class RendererPS(RendererBase):
             if store: self.color = (r,g,b)
 
     def set_linewidth(self, linewidth, store=1):
+        linewidth = float(linewidth)
         if linewidth != self.linewidth:
             self._pswriter.write("%1.3f setlinewidth\n"%linewidth)
             if store: self.linewidth = linewidth
@@ -272,14 +276,16 @@ class RendererPS(RendererBase):
     def set_linedash(self, offset, seq, store=1):
         if self.linedash is not None:
             oldo, oldseq = self.linedash
-            if seq_allequal(seq, oldseq): return
+            if seq_allequal(seq, oldseq) and oldo == offset:
+                return
 
         if seq is not None and len(seq):
             s="[%s] %d setdash\n"%(_nums_to_str(*seq), offset)
             self._pswriter.write(s)
         else:
             self._pswriter.write("[] 0 setdash\n")
-        if store: self.linedash = (offset,seq)
+        if store:
+            self.linedash = (offset, seq)
 
     def set_font(self, fontname, fontsize, store=1):
         if rcParams['ps.useafm']: return
@@ -297,6 +303,7 @@ class RendererPS(RendererBase):
         if hatch in self._hatches:
             return self._hatches[hatch]
         name = 'H%d' % len(self._hatches)
+        linewidth = rcParams['hatch.linewidth']
         self._pswriter.write("""\
   << /PatternType 1
      /PaintType 2
@@ -307,7 +314,7 @@ class RendererPS(RendererBase):
 
      /PaintProc {
         pop
-        0 setlinewidth
+        %(linewidth)f setlinewidth
 """ % locals())
         self._pswriter.write(
             self._convert_path(Path.hatch(hatch), Affine2D().scale(72.0),
@@ -325,7 +332,7 @@ class RendererPS(RendererBase):
 
     def get_canvas_width_height(self):
         'return the canvas width and height in display coords'
-        return self.width, self.height
+        return self.width * 72.0, self.height * 72.0
 
     def get_text_width_height_descent(self, s, prop, ismath):
         """
@@ -388,41 +395,17 @@ class RendererPS(RendererBase):
         return font
 
     def _get_font_ttf(self, prop):
-        key = hash(prop)
-        font = self.fontd.get(key)
-        if font is None:
-            fname = findfont(prop)
-            font = self.fontd.get(fname)
-            if font is None:
-                font = FT2Font(fname)
-                self.fontd[fname] = font
-            self.fontd[key] = font
+        fname = findfont(prop)
+        font = get_font(fname)
         font.clear()
         size = prop.get_size_in_points()
         font.set_size(size, 72.0)
         return font
 
-    def _rgba(self, im):
-        return im.as_rgba_str()
-
-    def _rgb(self, im):
-        h,w,s = im.as_rgba_str()
-
-        rgba = np.fromstring(s, np.uint8)
-        rgba.shape = (h, w, 4)
-        rgb = rgba[:,:,:3]
+    def _rgb(self, rgba):
+        h, w = rgba.shape[:2]
+        rgb = rgba[::-1, :, :3]
         return h, w, rgb.tostring()
-
-    def _gray(self, im, rc=0.3, gc=0.59, bc=0.11):
-        rgbat = im.as_rgba_str()
-        rgba = np.fromstring(rgbat[2], np.uint8)
-        rgba.shape = (rgbat[0], rgbat[1], 4)
-        rgba_f = rgba.astype(np.float32)
-        r = rgba_f[:,:,0]
-        g = rgba_f[:,:,1]
-        b = rgba_f[:,:,2]
-        gray = (r*rc + g*gc + b*bc).astype(np.uint8)
-        return rgbat[0], rgbat[1], gray.tostring()
 
     def _hex_lines(self, s, chars_per_line=128):
         s = binascii.b2a_hex(s)
@@ -447,49 +430,39 @@ class RendererPS(RendererBase):
         """
         return True
 
+    def option_image_nocomposite(self):
+        """
+        return whether to generate a composite image from multiple images on
+        a set of axes
+        """
+        return not rcParams['image.composite_image']
+
     def _get_image_h_w_bits_command(self, im):
-        if im.is_grayscale:
-            h, w, bits = self._gray(im)
-            imagecmd = "image"
-        else:
-            h, w, bits = self._rgb(im)
-            imagecmd = "false 3 colorimage"
+        h, w, bits = self._rgb(im)
+        imagecmd = "false 3 colorimage"
 
         return h, w, bits, imagecmd
 
-    def draw_image(self, gc, x, y, im, dx=None, dy=None, transform=None):
+    def draw_image(self, gc, x, y, im, transform=None):
         """
         Draw the Image instance into the current axes; x is the
         distance in pixels from the left hand side of the canvas and y
         is the distance from bottom
-
-        dx, dy is the width and height of the image.  If a transform
-        (which must be an affine transform) is given, x, y, dx, dy are
-        interpreted as the coordinate of the transform.
         """
-
-        im.flipud_out()
 
         h, w, bits, imagecmd = self._get_image_h_w_bits_command(im)
         hexlines = b'\n'.join(self._hex_lines(bits)).decode('ascii')
 
-        if dx is None:
-            xscale = w / self.image_magnification
-        else:
-            xscale = dx
-
-        if dy is None:
-            yscale = h/self.image_magnification
-        else:
-            yscale = dy
-
-
         if transform is None:
             matrix = "1 0 0 1 0 0"
+            xscale = w / self.image_magnification
+            yscale = h / self.image_magnification
         else:
-            matrix = " ".join(map(str, transform.to_values()))
+            matrix = " ".join(map(str, transform.frozen().to_values()))
+            xscale = 1.0
+            yscale = 1.0
 
-        figh = self.height*72
+        figh = self.height * 72
         #print 'values', origin, flipud, figh, h, y
 
         bbox = gc.get_clip_rectangle()
@@ -507,8 +480,8 @@ class RendererPS(RendererBase):
         #y = figh-(y+h)
         ps = """gsave
 %(clip)s
-[%(matrix)s] concat
 %(x)s %(y)s translate
+[%(matrix)s] concat
 %(xscale)s %(yscale)s scale
 /DataString %(w)s string def
 %(w)s %(h)s 8 [ %(w)s 0 0 -%(h)s 0 %(h)s ]
@@ -520,9 +493,6 @@ grestore
 """ % locals()
         self._pswriter.write(ps)
 
-        # unflip
-        im.flipud_out()
-
     def _convert_path(self, path, transform, clip=False, simplify=None):
         ps = []
         last_points = None
@@ -531,27 +501,9 @@ grestore
                     self.height * 72.0)
         else:
             clip = None
-        for points, code in path.iter_segments(transform, clip=clip,
-                                               simplify=simplify):
-            if code == Path.MOVETO:
-                ps.append("%g %g m" % tuple(points))
-            elif code == Path.CLOSEPOLY:
-                ps.append("cl")
-            elif last_points is None:
-                # The other operations require a previous point
-                raise ValueError('Path lacks initial MOVETO')
-            elif code == Path.LINETO:
-                ps.append("%g %g l" % tuple(points))
-            elif code == Path.CURVE3:
-                points = quad2cubic(*(list(last_points[-2:]) + list(points)))
-                ps.append("%g %g %g %g %g %g c" %
-                          tuple(points[2:]))
-            elif code == Path.CURVE4:
-                ps.append("%g %g %g %g %g %g c" % tuple(points))
-            last_points = points
-
-        ps = "\n".join(ps)
-        return ps
+        return _path.convert_to_string(
+            path, transform, clip, simplify, None,
+            6, [b'm', b'l', b'', b'c', b'cl'], True).decode('ascii')
 
     def _get_clip_path(self, clippath, clippath_transform):
         key = (clippath, id(clippath_transform))
@@ -564,7 +516,7 @@ grestore
             ps_cmd.extend(['clip', 'newpath', '} bind def\n'])
             self._pswriter.write('\n'.join(ps_cmd))
             self._clip_paths[key] = pid
-        return id
+        return pid
 
     def draw_path(self, gc, path, transform, rgbFace=None):
         """
@@ -633,6 +585,23 @@ grestore
                              offsets, offsetTrans, facecolors, edgecolors,
                              linewidths, linestyles, antialiaseds, urls,
                              offset_position):
+        # Is the optimization worth it? Rough calculation:
+        # cost of emitting a path in-line is
+        #     (len_path + 2) * uses_per_path
+        # cost of definition+use is
+        #     (len_path + 3) + 3 * uses_per_path
+        len_path = len(paths[0].vertices) if len(paths) > 0 else 0
+        uses_per_path = self._iter_collection_uses_per_path(
+            paths, all_transforms, offsets, facecolors, edgecolors)
+        should_do_optimization = \
+            len_path + 3 * uses_per_path + 3 < (len_path + 2) * uses_per_path
+        if not should_do_optimization:
+            return RendererBase.draw_path_collection(
+                self, gc, master_transform, paths, all_transforms,
+                offsets, offsetTrans, facecolors, edgecolors,
+                linewidths, linestyles, antialiaseds, urls,
+                offset_position)
+
         write = self._pswriter.write
 
         path_codes = []
@@ -760,10 +729,9 @@ grestore
             except KeyError:
                 ps_name = sfnt[(3,1,0x0409,6)].decode(
                     'utf-16be')
-            ps_name = ps_name.encode('ascii', 'replace')
+            ps_name = ps_name.encode('ascii', 'replace').decode('ascii')
             self.set_font(ps_name, prop.get_size_in_points())
 
-            cmap = font.get_charmap()
             lastgind = None
             #print 'text', s
             lines = []
@@ -771,7 +739,7 @@ grestore
             thisy = 0
             for c in s:
                 ccode = ord(c)
-                gind = cmap.get(ccode)
+                gind = font.get_char_index(ccode)
                 if gind is None:
                     ccode = ord('?')
                     name = '.notdef'
@@ -1138,11 +1106,10 @@ class FigureCanvasPS(FigureCanvasBase):
             if not rcParams['ps.useafm']:
                 for font_filename, chars in six.itervalues(ps_renderer.used_characters):
                     if len(chars):
-                        font = FT2Font(font_filename)
-                        cmap = font.get_charmap()
+                        font = get_font(font_filename)
                         glyph_ids = []
                         for c in chars:
-                            gind = cmap.get(c) or 0
+                            gind = font.get_char_index(c)
                             glyph_ids.append(gind)
 
                         fonttype = rcParams['ps.fonttype']
@@ -1453,6 +1420,10 @@ def convert_psfrags(tmpfile, psfrags, font_preamble, custom_preamble,
     # multiple
     if sys.platform == 'win32': precmd = '%s &&'% os.path.splitdrive(tmpdir)[0]
     else: precmd = ''
+    #Replace \\ for / so latex does not think there is a function call
+    latexfile = latexfile.replace("\\", "/")
+    # Replace ~ so Latex does not think it is line break
+    latexfile = latexfile.replace("~", "\\string~")
     command = '%s cd "%s" && latex -interaction=nonstopmode "%s" > "%s"'\
                 %(precmd, tmpdir, latexfile, outfile)
     verbose.report(command, 'debug')
@@ -1531,8 +1502,13 @@ def gs_distill(tmpfile, eps=False, ptype='letter', bbox=None, rotated=False):
 
     with io.open(outfile, 'rb') as fh:
         if exit_status:
-            raise RuntimeError('ghostscript was not able to process \
-    your image.\nHere is the full report generated by ghostscript:\n\n' + fh.read())
+            output = fh.read()
+            m = "\n".join(["ghostscript was not able to process your image.",
+                           "Here is the full report generated by ghostscript:",
+                           "",
+                           "%s"])
+            # use % to prevent problems with bytes
+            raise RuntimeError(m % output)
         else:
             verbose.report(fh.read(), 'debug')
     os.remove(outfile)
@@ -1570,6 +1546,7 @@ def xpdf_distill(tmpfile, eps=False, ptype='letter', bbox=None, rotated=False):
     else: paper_option = "-sPAPERSIZE=%s" % ptype
 
     command = 'ps2pdf -dAutoFilterColorImages=false \
+-dAutoFilterGrayImages=false -sGrayImageFilter=FlateEncode \
 -sColorImageFilter=FlateEncode %s "%s" "%s" > "%s"'% \
 (paper_option, tmpfile, pdffile, outfile)
     if sys.platform == 'win32': command = command.replace('=', '#')
@@ -1720,6 +1697,7 @@ def pstoeps(tmpfile, bbox=None, rotated=False):
                     write(b'countdictstack\n')
                     write(b'exch sub { end } repeat\n')
                     write(b'restore\n')
+                    write(b'showpage\n')
                     write(b'%%EOF\n')
                 elif line.startswith(b'%%PageBoundingBox'):
                     pass

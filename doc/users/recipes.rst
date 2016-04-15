@@ -12,7 +12,7 @@ figures and overcome some matplotlib warts.
 Sharing axis limits and views
 =============================
 
-It's common to make two or more plots which share an axis, eg two
+It's common to make two or more plots which share an axis, e.g., two
 subplots with time as a common axis.  When you pan and zoom around on
 one, you want the other to move around with you.  To facilitate this,
 matplotlib Axes support a ``sharex`` and ``sharey`` attribute.  When
@@ -118,7 +118,15 @@ you will see that the x tick labels are all squashed together.
 
    import matplotlib.cbook as cbook
    datafile = cbook.get_sample_data('goog.npy')
-   r = np.load(datafile).view(np.recarray)
+   try:
+       # Python3 cannot load python2 .npy files with datetime(object) arrays
+       # unless the encoding is set to bytes. Hovever this option was
+       # not added until numpy 1.10 so this example will only work with
+       # python 2 or with numpy 1.10 and later.
+       r = np.load(datafile, encoding='bytes').view(np.recarray)
+   except TypeError:
+       # Old Numpy
+       r = np.load(datafile).view(np.recarray)
    plt.figure()
    plt.plot(r.date, r.close)
    plt.title('Default date handling can cause overlapping labels')
@@ -126,9 +134,9 @@ you will see that the x tick labels are all squashed together.
 Another annoyance is that if you hover the mouse over the window and
 look in the lower right corner of the matplotlib toolbar
 (:ref:`navigation-toolbar`) at the x and y coordinates, you see that
-the x locations are formatted the same way the tick labels are, eg
+the x locations are formatted the same way the tick labels are, e.g.,
 "Dec 2004".  What we'd like is for the location in the toolbar to have
-a higher degree of precision, eg giving us the exact date out mouse is
+a higher degree of precision, e.g., giving us the exact date out mouse is
 hovering over.  To fix the first problem, we can use
 :func:`matplotlib.figure.Figure.autofmt_xdate` and to fix the second
 problem we can use the ``ax.fmt_xdata`` attribute which can be set to
@@ -161,7 +169,7 @@ Fill Between and Alpha
 The :meth:`~matplotlib.axes.Axes.fill_between` function generates a
 shaded region between a min and max boundary that is useful for
 illustrating ranges.  It has a very handy ``where`` argument to
-combine filling with logical ranges, eg to just fill in a curve over
+combine filling with logical ranges, e.g., to just fill in a curve over
 some threshold value.
 
 At its most basic level, ``fill_between`` can be use to enhance a
@@ -179,8 +187,14 @@ right.
 
    # load up some sample financial data
    datafile = cbook.get_sample_data('goog.npy')
-   r = np.load(datafile).view(np.recarray)
-
+   try:
+       # Python3 cannot load python2 .npy files with datetime(object) arrays
+       # unless the encoding is set to bytes. Hovever this option was
+       # not added until numpy 1.10 so this example will only work with
+       # python 2 or with numpy 1.10 and later.
+       r = np.load(datafile, encoding='bytes').view(np.recarray)
+   except TypeError:
+       r = np.load(datafile).view(np.recarray)
    # create two subplots with the shared x and y axes
    fig, (ax1, ax2) = plt.subplots(1,2, sharex=True, sharey=True)
 
@@ -363,4 +377,3 @@ argument takes a dictionary with keys that are Patch properties.
    # place a text box in upper left in axes coords
    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=14,
            verticalalignment='top', bbox=props)
-

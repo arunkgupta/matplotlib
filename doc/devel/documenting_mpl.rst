@@ -86,21 +86,23 @@ function that takes a ``**kwargs``.  The requirements are:
 2. as automated as possible so that as properties change, the docs
    are updated automagically.
 
-The functions :attr:`matplotlib.artist.kwdocd` and
-:func:`matplotlib.artist.kwdoc` to facilitate this.  They combine
+The function :func:`matplotlib.artist.kwdoc` and the decorator
+:func:`matplotlib.docstring.dedent_interpd` facilitate this.  They combine
 python string interpolation in the docstring with the matplotlib
 artist introspection facility that underlies ``setp`` and ``getp``.
-The ``kwdocd`` is a single dictionary that maps class name to a
-docstring of ``kwargs``.  Here is an example from
+The ``kwdoc`` function gives the list of properties as a docstring. In order
+to use this in another docstring, first update the
+``matplotlib.docstring.interpd`` object, as seen in this example from
 :mod:`matplotlib.lines`::
 
   # in lines.py
-  artist.kwdocd['Line2D'] = artist.kwdoc(Line2D)
+  docstring.interpd.update(Line2D=artist.kwdoc(Line2D))
 
 Then in any function accepting :class:`~matplotlib.lines.Line2D`
 pass-through ``kwargs``, e.g., :meth:`matplotlib.axes.Axes.plot`::
 
   # in axes.py
+  @docstring.dedent_interpd
   def plot(self, *args, **kwargs):
       """
       Some stuff omitted
@@ -114,7 +116,6 @@ pass-through ``kwargs``, e.g., :meth:`matplotlib.axes.Axes.plot`::
       information
       """
       pass
-  plot.__doc__ = cbook.dedent(plot.__doc__) % artist.kwdocd
 
 Note there is a problem for :class:`~matplotlib.artist.Artist`
 ``__init__`` methods, e.g., :meth:`matplotlib.patches.Patch.__init__`,
@@ -123,7 +124,7 @@ work until the class is fully defined and we can't modify the
 ``Patch.__init__.__doc__`` docstring outside the class definition.
 There are some some manual hacks in this case, violating the
 "single entry point" requirement above -- see the
-``artist.kwdocd['Patch']`` setting in :mod:`matplotlib.patches`.
+``docstring.interpd.update`` calls in :mod:`matplotlib.patches`.
 
 .. _formatting-mpl-docs:
 
@@ -362,7 +363,7 @@ Referring to mpl documents
 In the documentation, you may want to include to a document in the
 matplotlib src, e.g., a license file or an image file from `mpl-data`,
 refer to it via a relative path from the document where the rst file
-resides, eg, in :file:`users/navigation_toolbar.rst`, we refer to the
+resides, e.g., in :file:`users/navigation_toolbar.rst`, we refer to the
 image icons with::
 
     .. image:: ../../lib/matplotlib/mpl-data/images/subplots.png
@@ -392,7 +393,7 @@ So we can include plots from the examples dir using the symlink::
 
 
 We used to use a symlink for :file:`mpl-data` too, but the distro
-becomes very large on platforms that do not support links (eg the font
+becomes very large on platforms that do not support links (e.g., the font
 files are duplicated and large)
 
 .. _internal-section-refs:
@@ -401,7 +402,7 @@ Internal section references
 ===========================
 
 To maximize internal consistency in section labeling and references,
-use hyphen separated, descriptive labels for section references, eg::
+use hyphen separated, descriptive labels for section references, e.g.,::
 
     .. _howto-webapp:
 
@@ -429,7 +430,7 @@ Section names, etc
 ==================
 
 For everything but top level chapters, please use ``Upper lower`` for
-section titles, eg ``Possible hangups`` rather than ``Possible
+section titles, e.g., ``Possible hangups`` rather than ``Possible
 Hangups``
 
 Inheritance diagrams

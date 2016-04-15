@@ -1,8 +1,8 @@
 .. _developers-guide-index:
 
-####################################
-  The Matplotlib Developers' Guide
-####################################
+################################
+The Matplotlib Developers' Guide
+################################
 
 .. htmlonly::
 
@@ -21,3 +21,5 @@
    release_guide.rst
    transformations.rst
    add_new_projection.rst
+   color_changes
+   MEP/index

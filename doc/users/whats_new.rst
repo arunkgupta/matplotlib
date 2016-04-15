@@ -4,25 +4,757 @@
 What's new in matplotlib
 ************************
 
-This page just covers the highlights -- for the full story, see the
-`CHANGELOG <http://matplotlib.org/_static/CHANGELOG>`_
-
 For a list of all of the issues and pull requests since the last
 revision, see the :ref:`github-stats`.
 
 .. note::
-   Matplotlib version 1.1 is the last major release compatible with Python
-   versions 2.4 to 2.7.  matplotlib 1.2 and later require
-   versions 2.6, 2.7, and 3.1 and higher.
+   matplotlib 1.5 supports Python 2.7, 3.4, and 3.5
+
+   matplotlib 1.4 supports Python 2.6, 2.7, 3.3, and 3.4
+
+   matplotlib 1.3 supports Python 2.6, 2.7, 3.2, and 3.3
+
+   matplotlib 1.2 supports Python 2.6, 2.7, and 3.1
+
+   matplotlib 1.1 supports Python 2.4 to 2.7
+
+
 
 .. contents:: Table of Contents
    :depth: 3
+
+.. _whats-new-1-5:
+
+new in matplotlib-1.5
+=====================
+
+Interactive OO usage
+--------------------
+
+All `Artists` now keep track of if their internal state has been
+changed but not reflected in the display ('stale') by a call to
+``draw``.  It is thus possible to pragmatically determine if a given
+`Figure` needs to be re-drawn in an interactive session.
+
+To facilitate interactive usage a ``draw_all`` method has been added
+to ``pyplot`` which will redraw all of the figures which are 'stale'.
+
+To make this convenient for interactive use matplotlib now registers
+a function either with IPython's 'post_execute' event or with the
+displayhook in the standard python REPL to automatically call
+``plt.draw_all`` just before control is returned to the REPL.  This ensures
+that the draw command is deferred and only called once.
+
+The upshot of this is that for interactive backends (including
+``%matplotlib notebook``) in interactive mode (with ``plt.ion()``)
+
+.. ipython :: python
+
+   import matplotlib.pyplot as plt
+
+   fig, ax = plt.subplots()
+
+   ln, = ax.plot([0, 1, 4, 9, 16])
+
+   plt.show()
+
+   ln.set_color('g')
+
+
+will automatically update the plot to be green.  Any subsequent
+modifications to the ``Artist`` objects will do likewise.
+
+This is the first step of a larger consolidation and simplification of
+the pyplot internals.
+
+
+Working with labeled data like pandas DataFrames
+------------------------------------------------
+Plot methods which take arrays as inputs can now also work with labeled data
+and unpack such data.
+
+This means that the following two examples produce the same plot:
+
+Example ::
+
+    df = pandas.DataFrame({"var1":[1,2,3,4,5,6], "var2":[1,2,3,4,5,6]})
+    plt.plot(df["var1"], df["var2"])
+
+
+Example ::
+
+    plt.plot("var1", "var2", data=df)
+
+This works for most plotting methods, which expect arrays/sequences as
+inputs.  ``data`` can be anything which supports ``__getitem__``
+(``dict``, ``pandas.DataFrame``, ``h5py``, ...) to access ``array`` like
+values with string keys.
+
+In addition to this, some other changes were made, which makes working with
+labeled data (ex ``pandas.Series``) easier:
+
+* For plotting methods with ``label`` keyword argument, one of the
+  data inputs is designated as the label source.  If the user does not
+  supply a ``label`` that value object will be introspected for a
+  label, currently by looking for a ``name`` attribute.  If the value
+  object does not have a ``name`` attribute but was specified by as a
+  key into the ``data`` kwarg, then the key is used.  In the above
+  examples, this results in an implicit ``label="var2"`` for both
+  cases.
+
+* ``plot()`` now uses the index of a ``Series`` instead of
+  ``np.arange(len(y))``, if no ``x`` argument is supplied.
+
+
+Added ``axes.prop_cycle`` key to rcParams
+-----------------------------------------
+
+This is a more generic form of the now-deprecated ``axes.color_cycle`` param.
+Now, we can cycle more than just colors, but also linestyles, hatches,
+and just about any other artist property. Cycler notation is used for
+defining property cycles. Adding cyclers together will be like you are
+`zip()`-ing together two or more property cycles together::
+
+    axes.prop_cycle: cycler('color', 'rgb') + cycler('lw', [1, 2, 3])
+
+You can even multiply cyclers, which is like using `itertools.product()`
+on two or more property cycles. Remember to use parentheses if writing
+a multi-line `prop_cycle` parameter.
+
+.. plot:: mpl_examples/color/color_cycle_demo.py
+
+
+New Colormaps
+--------------
+
+All four of the colormaps proposed as the new default are available
+as ``'viridis'`` (the new default in 2.0), ``'magma'``, ``'plasma'``, and
+``'inferno'``
+
+.. plot::
+
+   import numpy as np
+   from cycler import cycler
+   cmap = cycler('cmap', ['viridis', 'magma','plasma', 'inferno'])
+   x_mode = cycler('x', [1, 2])
+   y_mode = cycler('y', x_mode)
+
+   cy = (x_mode * y_mode) + cmap
+
+   def demo(ax, x, y, cmap):
+       X, Y = np.ogrid[0:2*np.pi:200j, 0:2*np.pi:200j]
+       data = np.sin(X*x) * np.cos(Y*y)
+       ax.imshow(data, interpolation='none', cmap=cmap)
+       ax.set_title(cmap)
+
+   fig, axes = plt.subplots(2, 2)
+   for ax, sty in zip(axes.ravel(), cy):
+       demo(ax, **sty)
+
+   fig.tight_layout()
+
+
+Styles
+------
+
+Several new styles have been added, including many styles from the
+Seaborn project.  Additionally, in order to prep for the upcoming 2.0
+style-change release, a 'classic' and 'default' style has been added.
+For this release, the 'default' and 'classic' styles are identical.
+By using them now in your scripts, you can help ensure a smooth
+transition during future upgrades of matplotlib, so that you can
+upgrade to the snazzy new defaults when you are ready! ::
+
+    import matplotlib.style
+    matplotlib.style.use('classic')
+
+The 'default' style will give you matplotlib's latest plotting styles::
+
+    matplotlib.style.use('default')
+
+Backends
+--------
+
+New backend selection
+`````````````````````
+
+The environment variable :envvar:`MPLBACKEND` can now be used to set the
+matplotlib backend.
+
+
+wx backend has been updated
+```````````````````````````
+
+The wx backend can now be used with both wxPython classic and
+`Phoenix <http://wxpython.org/Phoenix/docs/html/main.html>`__.
+
+wxPython classic has to be at least version 2.8.12 and works on Python 2.x. As
+of May 2015 no official release of wxPython Phoenix is available but a
+current snapshot will work on Python 2.7+ and 3.4+.
+
+If you have multiple versions of wxPython installed, then the user code is
+responsible setting the wxPython version.  How to do this is
+explained in the comment at the beginning of the example
+`examples\user_interfaces\embedding_in_wx2.py`.
+
+Configuration (rcParams)
+------------------------
+
+Some parameters have been added, others have been improved.
+
++-------------------------+--------------------------------------------------+
+| Parameter               | Description                                      |
++=========================+==================================================+
+|`{x,y}axis.labelpad`     | mplot3d now respects these parameters            |
++-------------------------+--------------------------------------------------+
+|`axes.labelpad`          | Default space between the axis and the label     |
++-------------------------+--------------------------------------------------+
+|`errorbar.capsize`       | Default length of end caps on error bars         |
++-------------------------+--------------------------------------------------+
+|`{x,y}tick.minor.visible`| Default visibility of minor x/y ticks            |
++-------------------------+--------------------------------------------------+
+|`legend.framealpha`      | Default transparency of the legend frame box     |
++-------------------------+--------------------------------------------------+
+|`legend.facecolor`       | Default facecolor of legend frame box (or        |
+|                         | ``'inherit'`` from `axes.facecolor`)             |
++-------------------------+--------------------------------------------------+
+|`legend.edgecolor`       | Default edgecolor of legend frame box (or        |
+|                         | ``'inherit'`` from `axes.edgecolor`)             |
++-------------------------+--------------------------------------------------+
+|`figure.titlesize`       | Default font size for figure suptitles           |
++-------------------------+--------------------------------------------------+
+|`figure.titleweight`     | Default font weight for figure suptitles         |
++-------------------------+--------------------------------------------------+
+|`image.composite_image`  | Whether a vector graphics backend should         |
+|                         | composite several images into a single image or  |
+|                         | not when saving. Useful when needing to edit the |
+|                         | files further in Inkscape or other programs.     |
++-------------------------+--------------------------------------------------+
+|`markers.fillstyle`      | Default fillstyle of markers. Possible values    |
+|                         | are ``'full'`` (the default), ``'left'``,        |
+|                         | ``'right'``, ``'bottom'``, ``'top'`` and         |
+|                         | ``'none'``                                       |
++-------------------------+--------------------------------------------------+
+|`toolbar`                | Added ``'toolmanager'`` as a valid value,        |
+|                         | enabling the experimental ``ToolManager``        |
+|                         | feature.                                         |
++-------------------------+--------------------------------------------------+
+
+
+Widgets
+-------
+
+Active state of Selectors
+`````````````````````````
+
+All selectors now implement ``set_active`` and ``get_active`` methods (also
+called when accessing the ``active`` property) to properly update and query
+whether they are active.
+
+
+Moved ``ignore``, ``set_active``, and ``get_active`` methods to base class ``Widget``
+`````````````````````````````````````````````````````````````````````````````````````
+
+Pushes up duplicate methods in child class to parent class to avoid duplication of code.
+
+
+Adds enable/disable feature to MultiCursor
+``````````````````````````````````````````
+
+A MultiCursor object can be disabled (and enabled) after it has been created without destroying the object.
+Example::
+
+  multi_cursor.active = False
+
+
+Improved RectangleSelector and new EllipseSelector Widget
+`````````````````````````````````````````````````````````
+
+Adds an `interactive` keyword which enables visible handles for manipulating the shape after it has been drawn.
+
+Adds keyboard modifiers for:
+
+- Moving the existing shape (default key = 'space')
+- Making the shape square (default 'shift')
+- Make the initial point the center of the shape (default 'control')
+- Square and center can be combined
+
+Allow Artists to Display Pixel Data in Cursor
+`````````````````````````````````````````````
+
+Adds `get_pixel_data` and `format_pixel_data` methods to artists
+which can be used to add zdata to the cursor display
+in the status bar.  Also adds an implementation for Images.
+
+
+New plotting features
+---------------------
+
+
+Auto-wrapping Text
+``````````````````
+
+Added the keyword argument "wrap" to Text, which automatically breaks
+long lines of text when being drawn.  Works for any rotated text,
+different modes of alignment, and for text that are either labels or
+titles.  This breaks at the ``Figure``, not ``Axes`` edge.
+
+.. plot::
+
+   fig, ax = plt.subplots()
+   fig.patch.set_color('.9')
+   ax.text(.5, .75,
+           "This is a really long string that should be wrapped so that "
+           "it does not go outside the figure.", wrap=True)
+
+Contour plot corner masking
+```````````````````````````
+
+Ian Thomas rewrote the C++ code that calculates contours to add support for
+corner masking.  This is controlled by a new keyword argument
+``corner_mask`` in the functions :func:`~matplotlib.pyplot.contour` and
+:func:`~matplotlib.pyplot.contourf`.  The previous behaviour, which is now
+obtained using ``corner_mask=False``, was for a single masked point to
+completely mask out all four quads touching that point.  The new behaviour,
+obtained using ``corner_mask=True``, only masks the corners of those
+quads touching the point; any triangular corners comprising three unmasked
+points are contoured as usual.  If the ``corner_mask`` keyword argument is not
+specified, the default value is taken from rcParams.
+
+.. plot:: mpl_examples/pylab_examples/contour_corner_mask.py
+
+
+Mostly unified linestyles for `Line2D`, `Patch` and `Collection`
+`````````````````````````````````````````````````````````````````
+
+The handling of linestyles for Lines, Patches and Collections has been
+unified.  Now they all support defining linestyles with short symbols,
+like `"--"`, as well as with full names, like ``"dashed"``. Also the
+definition using a dash pattern (``(0., [3., 3.])``) is supported for all
+methods using `Line2D`, `Patch` or ``Collection``.
+
+
+Legend marker order
+```````````````````
+
+Added ability to place the label before the marker in a legend box with
+``markerfirst`` keyword
+
+
+Support for legend for PolyCollection and stackplot
+```````````````````````````````````````````````````
+
+Added a `legend_handler` for :class:`~matplotlib.collections.PolyCollection` as well as a `labels` argument to
+:func:`~matplotlib.axes.Axes.stackplot`.
+
+
+Support for alternate pivots in mplot3d quiver plot
+```````````````````````````````````````````````````
+
+Added a :code:`pivot` kwarg to :func:`~mpl_toolkits.mplot3d.Axes3D.quiver`
+that controls the pivot point around which the quiver line rotates. This also
+determines the placement of the arrow head along the quiver line.
+
+
+Logit Scale
+```````````
+
+Added support for the 'logit' axis scale, a nonlinear transformation
+
+.. math::
+
+   x -> \log10(x / (1-x))
+
+for data between 0 and 1 excluded.
+
+
+Add step kwargs to fill_between
+```````````````````````````````
+
+Added ``step`` kwarg to `Axes.fill_between` to allow to fill between
+lines drawn using the 'step' draw style.  The values of ``step`` match
+those of the ``where`` kwarg of `Axes.step`.  The asymmetry of of the
+kwargs names is not ideal, but `Axes.fill_between` already has a
+``where`` kwarg.
+
+This is particularly useful for plotting pre-binned histograms.
+
+.. plot:: mpl_examples/api/filled_step.py
+
+
+Square Plot
+```````````
+
+Implemented square plots feature as a new parameter in the axis
+function. When argument 'square' is specified, equal scaling is set,
+and the limits are set such that ``xmax-xmin == ymax-ymin``.
+
+.. plot::
+
+   fig, ax = plt.subplots()
+   ax.axis('square')
+
+
+Updated figimage to take optional resize parameter
+``````````````````````````````````````````````````
+
+Added the ability to plot simple 2D-Array using ``plt.figimage(X, resize=True)``.
+This is useful for plotting simple 2D-Array without the Axes or whitespacing
+around the image.
+
+.. plot::
+
+   data = np.random.random([500, 500])
+   plt.figimage(data, resize=True)
+
+Updated Figure.savefig() can now use figure's dpi
+`````````````````````````````````````````````````
+
+Added support to save the figure with the same dpi as the figure on the
+screen using `dpi='figure'`.
+
+Example::
+
+   f = plt.figure(dpi=25)               # dpi set to 25
+   S = plt.scatter([1,2,3],[4,5,6])
+   f.savefig('output.png', dpi='figure')    # output savefig dpi set to 25 (same as figure)
+
+
+Updated Table to control edge visibility
+````````````````````````````````````````
+
+Added the ability to toggle the visibility of lines in Tables.
+Functionality added to the :func:`pyplot.table` factory function under
+the keyword argument "edges".  Values can be the strings "open", "closed",
+"horizontal", "vertical" or combinations of the letters "L", "R", "T",
+"B" which represent left, right, top, and bottom respectively.
+
+Example::
+
+    table(..., edges="open")  # No line visible
+    table(..., edges="closed")  # All lines visible
+    table(..., edges="horizontal")  # Only top and bottom lines visible
+    table(..., edges="LT")  # Only left and top lines visible.
+
+Zero r/cstride support in plot_wireframe
+````````````````````````````````````````
+
+Adam Hughes added support to mplot3d's plot_wireframe to draw only row or
+column line plots.
+
+
+.. plot::
+
+    from mpl_toolkits.mplot3d import Axes3D, axes3d
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    X, Y, Z = axes3d.get_test_data(0.05)
+    ax.plot_wireframe(X, Y, Z, rstride=10, cstride=0)
+
+
+Plot bar and barh with labels
+`````````````````````````````
+
+Added kwarg ``"tick_label"`` to `bar` and `barh` to support plotting bar graphs with a
+text label for each bar.
+
+.. plot::
+
+   plt.bar([1, 2], [.5, .75], tick_label=['bar1', 'bar2'],
+           align='center')
+
+Added center and frame kwargs to pie
+````````````````````````````````````
+
+These control where the center of the pie graph are and if
+the Axes frame is shown.
+
+Fixed 3D filled contour plot polygon rendering
+``````````````````````````````````````````````
+
+Certain cases of 3D filled contour plots that produce polygons with multiple
+holes produced improper rendering due to a loss of path information between
+:class:`~matplotlib.collections.PolyCollection` and
+:class:`~mpl_toolkits.mplot3d.art3d.Poly3DCollection`.  A function
+:func:`~matplotlib.collections.PolyCollection.set_verts_and_codes` was
+added to allow path information to be retained for proper rendering.
+
+Dense colorbars are rasterized
+``````````````````````````````
+
+Vector file formats (pdf, ps, svg) are efficient for
+many types of plot element, but for some they can yield
+excessive file size and even rendering artifacts, depending
+on the renderer used for screen display.  This is a problem
+for colorbars that show a large number of shades, as is
+most commonly the case.  Now, if a colorbar is showing
+50 or more colors, it will be rasterized in vector
+backends.
+
+
+DateFormatter strftime
+``````````````````````
+:class:`~matplotlib.dates.DateFormatter`s'
+:meth:`~matplotlib.dates.DateFormatter.strftime` method will format
+a :class:`datetime.datetime` object with the format string passed to
+the formatter's constructor. This method accepts datetimes with years
+before 1900, unlike :meth:`datetime.datetime.strftime`.
+
+
+Artist-level {get,set}_usetex for text
+``````````````````````````````````````
+
+Add ``{get,set}_usetex`` methods to :class:`~matplotlib.text.Text` objects
+which allow artist-level control of LaTeX rendering vs the internal mathtex
+rendering.
+
+
+`ax.remove()` works as expected
+```````````````````````````````
+
+As with artists added to an :class:`~matplotlib.axes.Axes`,
+`Axes` objects can be removed from their figure via
+:meth:`~matplotlib.axes.Axes.remove()`.
+
+
+API Consistency fix within Locators set_params() function
+`````````````````````````````````````````````````````````
+
+:meth:`~matplotlib.ticker.Locator.set_params` function, which sets parameters
+within a :class:`~matplotlib.ticker.Locator` type
+instance, is now available to all `Locator` types. The implementation
+also prevents unsafe usage by strictly defining the parameters that a
+user can set.
+
+To use, call ``set_params()`` on a `Locator` instance with desired arguments:
+::
+
+    loc = matplotlib.ticker.LogLocator()
+    # Set given attributes for loc.
+    loc.set_params(numticks=8, numdecs=8, subs=[2.0], base=8)
+    # The below will error, as there is no such parameter for LogLocator
+    # named foo
+    # loc.set_params(foo='bar')
+
+
+Date Locators
+`````````````
+
+Date Locators (derived from :class:`~matplotlib.dates.DateLocator`) now
+implement the :meth:`~matplotlib.tickers.Locator.tick_values` method.
+This is expected of all Locators derived from :class:`~matplotlib.tickers.Locator`.
+
+The Date Locators can now be used easily without creating axes ::
+
+    from datetime import datetime
+    from matplotlib.dates import YearLocator
+    t0 = datetime(2002, 10, 9, 12, 10)
+    tf = datetime(2005, 10, 9, 12, 15)
+    loc = YearLocator()
+    values = loc.tick_values(t0, tf)
+
+OffsetBoxes now support clipping
+````````````````````````````````
+
+`Artists` draw onto objects of type :class:`~OffsetBox`
+through :class:`~OffsetBox.DrawingArea` and :class:`~OffsetBox.TextArea`.
+The `TextArea` calculates the required space for the text and so the
+text is always within the bounds, for this nothing has changed.
+
+However, `DrawingArea` acts as a parent for zero or more `Artists` that
+draw on it and may do so beyond the bounds. Now child `Artists` can be
+clipped to the bounds of the `DrawingArea`.
+
+
+OffsetBoxes now considered by tight_layout
+``````````````````````````````````````````
+
+When `~matplotlib.pyplot.tight_layout()` or `Figure.tight_layout()`
+or `GridSpec.tight_layout()` is called, `OffsetBoxes` that are
+anchored outside the axes will not get chopped out. The `OffsetBoxes` will
+also not get overlapped by other axes in case of multiple subplots.
+
+Per-page pdf notes in multi-page pdfs (PdfPages)
+````````````````````````````````````````````````
+
+Add a new method :meth:`~matplotlib.backends.backend_pdf.PdfPages.attach_note`
+to the PdfPages class, allowing the
+attachment of simple text notes to pages in a multi-page pdf of
+figures. The new note is visible in the list of pdf annotations in a
+viewer that has this facility (Adobe Reader, OSX Preview, Skim,
+etc.). Per default the note itself is kept off-page to prevent it to
+appear in print-outs.
+
+`PdfPages.attach_note` needs to be called before `savefig()` in order to be
+added to the correct figure.
+
+Updated fignum_exists to take figure name
+`````````````````````````````````````````
+
+Added the ability to check the existence of a figure using its name
+instead of just the figure number.
+Example::
+
+  figure('figure')
+  fignum_exists('figure') #true
+
+
+ToolManager
+-----------
+
+Federico Ariza wrote the new `~matplotlib.backend_managers.ToolManager`
+that comes as replacement for `NavigationToolbar2`
+
+`ToolManager` offers a new way of looking at the user interactions
+with the figures.  Before we had the `NavigationToolbar2` with its own
+tools like `zoom/pan/home/save/...` and also we had the shortcuts like
+`yscale/grid/quit/....` `Toolmanager` relocate all those actions as
+`Tools` (located in `~matplotlib.backend_tools`), and defines a way to
+`access/trigger/reconfigure` them.
+
+The `Toolbars` are replaced for `ToolContainers` that are just GUI
+interfaces to `trigger` the tools. But don't worry the default
+backends include a `ToolContainer` called `toolbar`
+
+
+.. note::
+    At the moment, we release this primarily for feedback purposes and should
+    be treated as experimental until further notice as API changes will occur.
+    For the moment the `ToolManager` works only with the `GTK3` and `Tk` backends.
+    Make sure you use one of those.
+    Port for the rest of the backends is comming soon.
+
+    To activate the `ToolManager` include the following at the top of your file ::
+
+      >>> matplotlib.rcParams['toolbar'] = 'toolmanager'
+
+
+Interact with the ToolContainer
+```````````````````````````````
+
+The most important feature is the ability to easily reconfigure the ToolContainer (aka toolbar).
+For example, if we want to remove the "forward" button we would just do. ::
+
+ >>> fig.canvas.manager.toolmanager.remove_tool('forward')
+
+Now if you want to programmatically trigger the "home" button ::
+
+ >>> fig.canvas.manager.toolmanager.trigger_tool('home')
+
+
+New Tools for ToolManager
+`````````````````````````
+
+It is possible to add new tools to the ToolManager
+
+A very simple tool that prints "You're awesome" would be::
+
+    from matplotlib.backend_tools import ToolBase
+    class AwesomeTool(ToolBase):
+        def trigger(self, *args, **kwargs):
+            print("You're awesome")
+
+
+To add this tool to `ToolManager`
+
+ >>> fig.canvas.manager.toolmanager.add_tool('Awesome', AwesomeTool)
+
+If we want to add a shortcut ("d") for the tool
+
+ >>> fig.canvas.manager.toolmanager.update_keymap('Awesome', 'd')
+
+
+To add it to the toolbar inside the group 'foo'
+
+ >>> fig.canvas.manager.toolbar.add_tool('Awesome', 'foo')
+
+
+There is a second class of tools, "Toggleable Tools", this are almost
+the same as our basic tools, just that belong to a group, and are
+mutually exclusive inside that group.  For tools derived from
+`ToolToggleBase` there are two basic methods `enable` and `disable`
+that are called automatically whenever it is toggled.
+
+
+A full example is located in :ref:`user_interfaces-toolmanager`
+
+
+cbook.is_sequence_of_strings recognizes string objects
+------------------------------------------------------
+
+This is primarily how pandas stores a sequence of strings ::
+
+    import pandas as pd
+    import matplotlib.cbook as cbook
+
+    a = np.array(['a', 'b', 'c'])
+    print(cbook.is_sequence_of_strings(a))  # True
+
+    a = np.array(['a', 'b', 'c'], dtype=object)
+    print(cbook.is_sequence_of_strings(a))  # True
+
+    s = pd.Series(['a', 'b', 'c'])
+    print(cbook.is_sequence_of_strings(s))  # True
+
+Previously, the last two prints returned false.
+
+
+New ``close-figs`` argument for plot directive
+----------------------------------------------
+
+Matplotlib has a sphinx extension ``plot_directive`` that creates plots for
+inclusion in sphinx documents.  Matplotlib 1.5 adds a new option to the plot
+directive - ``close-figs`` - that closes any previous figure windows before
+creating the plots.  This can help avoid some surprising duplicates of plots
+when using ``plot_directive``.
+
+Support for URL string arguments to ``imread``
+----------------------------------------------
+
+The :func:`~matplotlib.pyplot.imread` function now accepts URL strings that
+point to remote PNG files. This circumvents the generation of a
+HTTPResponse object directly.
+
+Display hook for animations in the IPython notebook
+---------------------------------------------------
+
+`~matplotlib.animation.Animation` instances gained a ``_repr_html_`` method
+to support inline display of animations in the notebook. The method used
+to display is controlled by the ``animation.html`` rc parameter, which
+currently supports values of ``none`` and ``html5``. ``none`` is the
+default, performing no display. ``html5`` converts the animation to an
+h264 encoded video, which is embedded directly in the notebook.
+
+Users not wishing to use the ``_repr_html_`` display hook can also manually
+call the `to_html5_video` method to get the HTML and display using
+IPython's ``HTML`` display class::
+
+    from IPython.display import HTML
+    HTML(anim.to_html5_video())
+
+Prefixed pkg-config for building
+--------------------------------
+
+Handling of `pkg-config` has been fixed in so far as it is now
+possible to set it using the environment variable `PKG_CONFIG`. This
+is important if your toolchain is prefixed. This is done in a simpilar
+way as setting `CC` or `CXX` before building. An example follows.
+
+    export PKG_CONFIG=x86_64-pc-linux-gnu-pkg-config
+
+AxesGrid toolkit
+----------------
+
+Twins of host axes (see `~mpl_toolkits.axes_grid1.host_subplot()` and its
+``twin*`` methods) now have ``remove()`` functionality. Some visibility changes
+made by the ``twin*`` methods were modified to faciliate this feature.
 
 .. _whats-new-1-4:
 
 new in matplotlib-1.4
 =====================
 
+Thomas A. Caswell served as the release manager for the 1.4 release.
 
 New colormap
 ------------
@@ -31,13 +763,31 @@ activity, but this can be problematic for the red/green colorblind. A new,
 colorblind-friendly colormap is now available at :class:`matplotlib.cm.Wistia`.
 This colormap maintains the red/green symbolism while achieving deuteranopic
 legibility through brightness variations. See
-`here <https://github.com/wistia/heatmap-palette>`
+`here <https://github.com/wistia/heatmap-palette>`__
 for more information.
 
-Documentation changes
----------------------
+The nbagg backend
+-----------------
+Phil Elson added a new backend, named "nbagg", which enables interactive
+figures in a live IPython notebook session. The backend makes use of the
+infrastructure developed for the webagg backend, which itself gives
+standalone server backed interactive figures in the browser, however nbagg
+does not require a dedicated matplotlib server as all communications are
+handled through the IPython Comm machinery.
 
-Phil Elson rewrote of the documentation and userguide for both Legend and PathEffects (links needed).
+As with other backends nbagg can be enabled inside the IPython notebook with::
+
+    import matplotlib
+    matplotlib.use('nbagg')
+
+Once figures are created and then subsequently shown, they will placed in an
+interactive widget inside the notebook allowing panning and zooming in the
+same way as any other matplotlib backend. Because figures require a connection
+to the IPython notebook server for their interactivity, once the notebook is
+saved, each figure will be rendered as a static image - thus allowing
+non-interactive viewing of figures on services such as
+`nbviewer <http://nbviewer.ipython.org/>`__.
+
 
 
 New plotting features
@@ -52,7 +802,7 @@ provided by the constructor's `gamma` argument. Power law normalization
 can be useful for, e.g., emphasizing small populations in a histogram.
 
 Fully customizable boxplots
-````````````````````````````
+```````````````````````````
 Paul Hobson overhauled the :func:`~matplotlib.pyplot.boxplot` method such
 that it is now completely customizable in terms of the styles and positions
 of the individual artists. Under the hood, :func:`~matplotlib.pyplot.boxplot`
@@ -63,20 +813,20 @@ containing the positions for each element of the boxplots. Then
 a second method, :func:`~matplotlib.Axes.bxp` is called to draw the boxplots
 based on the stats.
 
-The :func:~matplotlib.pyplot.boxplot function can be used as before to
+The :func:`~matplotlib.pyplot.boxplot` function can be used as before to
 generate boxplots from data in one step. But now the user has the
 flexibility to generate the statistics independently, or to modify the
-output of :func:~matplotlib.cbook.boxplot_stats prior to plotting
-with :func:~matplotlib.Axes.bxp.
+output of :func:`~matplotlib.cbook.boxplot_stats` prior to plotting
+with :func:`~matplotlib.Axes.bxp`.
 
 Lastly, each artist (e.g., the box, outliers, cap, notches) can now be
 toggled on or off and their styles can be passed in through individual
 kwargs. See the examples:
-:ref:`~examples/statistics/boxplot_demo.py` and
-:ref:`~examples/statistics/bxp_demo.py`
+:ref:`statistics-boxplot_demo` and
+:ref:`statistics-bxp_demo`
 
-Added a bool kwarg, `manage_xticks`, which if False disables the management
-of the xtick and xlim by `boxplot`.
+Added a bool kwarg, :code:`manage_xticks`, which if False disables the management
+of the ticks and limits on the x-axis by :func:`~matplotlib.axes.Axes.bxp`.
 
 Support for datetime axes in 2d plots
 `````````````````````````````````````
@@ -153,7 +903,7 @@ specifically the Skew-T used in meteorology.
 .. plot:: mpl_examples/api/skewt.py
 
 Support for specifying properties of wedge and text in pie charts.
-``````````````````````````````````````````````````````````````
+``````````````````````````````````````````````````````````````````
 Added the `kwargs` 'wedgeprops' and 'textprops' to :func:`~matplotlib.Axes.pie`
 to accept properties for wedge and text objects in a pie. For example, one can
 specify wedgeprops = {'linewidth':3} to specify the width of the borders of
@@ -168,7 +918,7 @@ that the upper and lower limits (*lolims*, *uplims*, *xlolims*,
 
 More consistent add-object API for Axes
 ```````````````````````````````````````
-Added the Axes method :meth:`~matplotlib.axes.Axes.add_image` to put image
+Added the Axes method `~matplotlib.axes.Axes.add_image` to put image
 handling on a par with artists, collections, containers, lines, patches,
 and tables.
 
@@ -219,7 +969,7 @@ elements of specialized collections (
 Fixed the mouse coordinates giving the wrong theta value in Polar graph
 ```````````````````````````````````````````````````````````````````````
 Added code to
-:funct:`~matplotlib.InvertedPolarTransform.transform_non_affine`
+:func:`~matplotlib.InvertedPolarTransform.transform_non_affine`
 to ensure that the calculated theta value was between the range of 0 and 2 * pi
 since the problem was that the value can become negative after applying the
 direction and rotation to the theta calculation.
@@ -234,6 +984,12 @@ The team members are: Ryan Steve D'Souza, Victor B, xbtsw, Yang Wang, David,
 Caradec Bisesar and Vlad Vassilovski.
 
 .. plot:: mpl_examples/mplot3d/quiver3d_demo.py
+
+polar-plot r-tick locations
+```````````````````````````
+Added the ability to control the angular position of the r-tick labels
+on a polar plot via :func:`~matplotlib.Axes.axes.set_rlabel_position`.
+
 
 Date handling
 -------------
@@ -250,11 +1006,17 @@ conversion interfaces :class:`matplotlib.dates.DateConverter` and
 Configuration (rcParams)
 ------------------------
 
+
 ``savefig.transparent`` added
 `````````````````````````````
 Controls whether figures are saved with a transparent
 background by default.  Previously `savefig` always defaulted
 to a non-transparent background.
+
+
+``axes.titleweight``
+````````````````````
+Added rcParam to control the weight of the title
 
 ``axes.formatter.useoffset`` added
 ``````````````````````````````````
@@ -264,8 +1026,19 @@ an offset will be determined such that the tick labels are
 meaningful. If `False` then the full number will be formatted in all
 conditions.
 
+``nbagg.transparent`` added
+`````````````````````````````
+Controls whether nbagg figures have a transparent
+background. ``nbagg.transparent`` is ``True`` by default.
+
+
+XDG compliance
+``````````````
+Matplotlib now looks for configuration files (both rcparams and style) in XDG
+compliant locations.
+
 ``style`` package added
-```````````````````````
+-----------------------
 You can now easily switch between different styles using the new ``style``
 package::
 
@@ -286,21 +1059,40 @@ users test out this new feature.
 
 Backends
 --------
+Qt5 backend
+```````````
+Martin Fitzpatrick and Tom Badran implemented a Qt5 backend.  The differences
+in namespace locations between Qt4 and Qt5 was dealt with by shimming
+Qt4 to look like Qt5, thus the Qt5 implementation is the primary implementation.
+Backwards compatibility for Qt4 is maintained by wrapping the Qt5 implementation.
+
+The Qt5Agg backend currently does not work with IPython's %matplotlib magic.
+
+The 1.4.0 release has a known bug where the toolbar is broken.  This can be
+fixed by: ::
+
+   cd path/to/installed/matplotlib
+   wget https://github.com/matplotlib/matplotlib/pull/3322.diff
+   # unix2dos 3322.diff (if on windows to fix line endings)
+   patch -p2 < 3322.diff
 
 Qt4 backend
-``````````````
+```````````
 Rudolf Höfler changed the appearance of the subplottool. All sliders are
 vertically arranged now, buttons for tight layout and reset were
-added. Furthermore, the the subplottool is now implemented as a modal
+added. Furthermore, the subplottool is now implemented as a modal
 dialog. It was previously a QMainWindow, leaving the SPT open if one closed the
-plotwindow.
+plot window.
 
-In the figureoptions dialog one can now choose to (re-)generate a simple
+In the figure options dialog one can now choose to (re-)generate a simple
 automatic legend. Any explicitly set legend entries will be lost, but changes to
 the curves' label, linestyle, et cetera will now be updated in the legend.
 
 Interactive performance of the Qt4 backend has been dramatically improved
 under windows.
+
+The mapping of key-signals from Qt to values matplotlib understands
+was greatly improved (For both Qt4 and Qt5).
 
 Cairo backends
 ``````````````
@@ -316,6 +1108,10 @@ Gtk3Agg backend
 The Gtk3Agg backend now works on Python 3.x, if the `cairocffi
 bindings <https://github.com/SimonSapin/cairocffi>`__ are installed.
 
+PDF backend
+```````````
+Added context manager for saving to multi-page PDFs.
+
 Text
 ----
 
@@ -327,6 +1123,12 @@ url as a link in output SVGs.  This allows one to make clickable text in
 saved figures using the url kwarg of the :class:`~matplotlib.text.Text`
 class.
 
+Anchored sizebar font
+`````````````````````
+Added the ``fontproperties`` kwarg to
+:class:`~matplotilb.mpl_toolkits.axes_grid.anchored_artists.AnchoredSizeBar` to
+control the font properties.
+
 Sphinx extensions
 -----------------
 
@@ -335,6 +1137,26 @@ Sphinx extension can now accept an optional ``reset`` setting, which will
 cause the context to be reset. This allows more than one distinct context to
 be present in documentation. To enable this option, use ``:context: reset``
 instead of ``:context:`` any time you want to reset the context.
+
+Legend and PathEffects documentation
+------------------------------------
+The :ref:`plotting-guide-legend` and :ref:`patheffects-guide` have both been
+updated to better reflect the full potential of each of these powerful
+features.
+
+Widgets
+-------
+
+Span Selector
+`````````````
+
+Added an option ``span_stays`` to the
+:class:`~matplotlib.widgets.SpanSelector` which makes the selector
+rectangle stay on the axes after you release the mouse.
+
+GAE integration
+---------------
+Matplotlib will now run on google app engine.
 
 .. _whats-new-1-3:
 
@@ -416,7 +1238,7 @@ New plotting features
 ````````````````````````````
 To give your plots a sense of authority that they may be missing,
 Michael Droettboom (inspired by the work of many others in
-:ghpull:`1329`) has added an `xkcd-style <http://xkcd.com/>`_ sketch
+:ghpull:`1329`) has added an `xkcd-style <http://xkcd.com/>`__ sketch
 plotting mode.  To use it, simply call :func:`matplotlib.pyplot.xkcd`
 before creating your plot. For really fine control, it is also possible
 to modify each artist's sketch parameters individually with
@@ -641,14 +1463,14 @@ Numpydoc docstrings
 ```````````````````
 Nelle Varoquaux has started an ongoing project to convert matplotlib's
 docstrings to numpydoc format.  See `MEP10
-<https://github.com/matplotlib/matplotlib/wiki/Mep10>`_ for more
+<https://github.com/matplotlib/matplotlib/wiki/Mep10>`__ for more
 information.
 
 Example reorganization
 ``````````````````````
 Tony Yu has begun work reorganizing the examples into more meaningful
 categories.  The new gallery page is the fruit of this ongoing work.
-See `MEP12 <https://github.com/matplotlib/matplotlib/wiki/MEP12>`_ for
+See `MEP12 <https://github.com/matplotlib/matplotlib/wiki/MEP12>`__ for
 more information.
 
 Examples now use subplots()
@@ -700,7 +1522,7 @@ without closing them.
 matplotlib will now display a `RuntimeWarning` when too many figures
 have been opened at once.  By default, this is displayed for 20 or
 more figures, but the exact number may be controlled using the
-``figure.max_num_figures`` rcParam.
+``figure.max_open_warning`` rcParam.
 
 .. _whats-new-1-2-2:
 
@@ -1000,7 +1822,7 @@ Gerald Storer made the Qt4 backend compatible with PySide as
 well as PyQT4.  At present, however, PySide does not support
 the PyOS_InputHook mechanism for handling gui events while
 waiting for text input, so it cannot be used with the new
-version 0.11 of `IPython <http://ipython.org>`_. Until this
+version 0.11 of `IPython <http://ipython.org>`__. Until this
 feature appears in PySide, IPython users should use
 the PyQT4 wrapper for QT4, which remains the matplotlib default.
 
@@ -1019,7 +1841,7 @@ legends for complex plots such as :meth:`~matplotlib.pyplot.stem` plots
 will now display correctly. Second, the 'best' placement of a legend has
 been improved in the presence of NANs.
 
-See :ref:`legend-complex-plots` for more detailed explanation and
+See the :ref:`plotting-guide-legend` for more detailed explanation and
 examples.
 
 .. plot:: mpl_examples/pylab_examples/legend_demo4.py
@@ -1128,7 +1950,7 @@ HTML5/Canvas backend
 ---------------------
 
 Simon Ratcliffe and Ludwig Schwardt have released an `HTML5/Canvas
-<http://code.google.com/p/mplh5canvas/>`_ backend for matplotlib.  The
+<http://code.google.com/p/mplh5canvas/>`__ backend for matplotlib.  The
 backend is almost feature complete, and they have done a lot of work
 comparing their html5 rendered images with our core renderer Agg.  The
 backend features client/server interactive navigation of matplotlib
@@ -1185,9 +2007,9 @@ figures since the last call.  Eric has done a lot of testing on the
 user interface toolkits and versions and platforms he has access to,
 but it is not possible to test them all, so please report problems to
 the `mailing list
-<http://sourceforge.net/mailarchive/forum.php?forum_name=matplotlib-users>`_
+<http://mail.python.org/mailman/listinfo/matplotlib-users>`__
 and `bug tracker
-<http://sourceforge.net/tracker/?group_id=80706&atid=560720>`_.
+<http://github.com/matplotlib/matplotlib/issues>`__.
 
 
 mplot3d graphs can be embedded in arbitrary axes
@@ -1229,13 +2051,13 @@ Much improved software carpentry
 
 The matplotlib trunk is probably in as good a shape as it has ever
 been, thanks to improved `software carpentry
-<http://software-carpentry.org/>`_.  We now have a `buildbot
-<http://buildbot.net/trac>`_ which runs a suite of `nose
-<http://code.google.com/p/python-nose/>`_ regression tests on every
+<http://software-carpentry.org/>`__.  We now have a `buildbot
+<http://buildbot.net/trac>`__ which runs a suite of `nose
+<http://code.google.com/p/python-nose/>`__ regression tests on every
 svn commit, auto-generating a set of images and comparing them against
 a set of known-goods, sending emails to developers on failures with a
 pixel-by-pixel `image comparison
-<http://mpl.code.astraw.com/overview.html>`_.  Releases and release
+<http://mpl.code.astraw.com/overview.html>`__.  Releases and release
 bugfixes happen in branches, allowing active new feature development
 to happen in the trunk while keeping the release branches stable.
 Thanks to Andrew Straw, Michael Droettboom and other matplotlib
@@ -1246,7 +2068,7 @@ Bugfix marathon
 
 Eric Firing went on a bug fixing and closing marathon, closing over
 100 bugs on the `bug tracker
-<http://sourceforge.net/tracker/?group_id=80706&atid=560720>`_ with
+<http://sourceforge.net/tracker/?group_id=80706&atid=560720>`__ with
 help from Jae-Joon Lee, Michael Droettboom, Christoph Gohlke and
 Michiel de Hoon.
 
@@ -1289,8 +2111,9 @@ axes grid toolkit
 Jae-Joon Lee has added a new toolkit to ease displaying multiple images in
 matplotlib, as well as some support for curvilinear grids to support
 the world coordinate system. The toolkit is included standard with all
-new mpl installs.  See :ref:`axes_grid-examples-index` and
-:ref:`axes_grid_users-guide-index`.
+new mpl installs.  See :ref:`axes_grid1-examples-index`,
+:ref:`axisartist-examples-index`, :ref:`axes_grid1_users-guide-index` and
+:ref:`axisartist_users-guide-index`
 
 .. plot:: pyplots/whats_new_99_axes_grid.py
 
@@ -1405,7 +2228,7 @@ Here are the 0.98.4 notes from the CHANGELOG::
 
     Some of the changes Michael made to improve the output of the
     property tables in the rest docs broke of made difficult to use
-    some of the interactive doc helpers, eg setp and getp.  Having all
+    some of the interactive doc helpers, e.g., setp and getp.  Having all
     the rest markup in the ipython shell also confused the docstrings.
     I added a new rc param docstring.harcopy, to format the docstrings
     differently for hardcopy and other use.  The ArtistInspector

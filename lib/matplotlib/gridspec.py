@@ -17,8 +17,8 @@ of the subplot in the figure.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import zip
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import zip
 
 import matplotlib
 rcParams = matplotlib.rcParams
@@ -48,7 +48,7 @@ class GridSpecBase(object):
         self.set_width_ratios(width_ratios)
 
     def get_geometry(self):
-        'get the geometry of the grid, eg 2,3'
+        'get the geometry of the grid, e.g., 2,3'
         return self._nrows, self._ncols
 
     def get_subplot_params(self, fig=None):
@@ -62,19 +62,23 @@ class GridSpecBase(object):
         subplotspec = self[loc1:loc1+rowspan, loc2:loc2+colspan]
         return subplotspec
 
-
     def set_width_ratios(self, width_ratios):
+        if width_ratios is not None and len(width_ratios) != self._ncols:
+            raise ValueError('Expected the given number of width ratios to '
+                             'match the number of columns of the grid')
         self._col_width_ratios = width_ratios
 
     def get_width_ratios(self):
         return self._col_width_ratios
 
     def set_height_ratios(self, height_ratios):
+        if height_ratios is not None and len(height_ratios) != self._nrows:
+            raise ValueError('Expected the given number of height ratios to '
+                             'match the number of rows of the grid')
         self._row_height_ratios = height_ratios
 
     def get_height_ratios(self):
         return self._row_height_ratios
-
 
     def get_grid_positions(self, fig):
         """
@@ -406,7 +410,7 @@ class SubplotSpec(object):
 
     def get_geometry(self):
         """
-        get the subplot geometry, eg 2,2,3. Unlike SuplorParams,
+        get the subplot geometry, e.g., 2,2,3. Unlike SuplorParams,
         index is 0-based
         """
         rows, cols = self.get_gridspec().get_geometry()

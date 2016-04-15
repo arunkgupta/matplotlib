@@ -123,18 +123,18 @@ class _TaggedValue(object):
                           {})
             if subcls not in units.registry:
                 units.registry[subcls] = basicConverter
-            return object.__new__(subcls, value, unit)
+            return object.__new__(subcls)
         except TypeError:
             if cls not in units.registry:
                 units.registry[cls] = basicConverter
-            return object.__new__(cls, value, unit)
+            return object.__new__(cls)
 
     def __init__(self, value, unit):
         self.value = value
         self.unit = unit
         self.proxy_target = self.value
 
-    def  __getattribute__(self, name):
+    def __getattribute__(self, name):
         if (name.startswith('__')):
             return object.__getattribute__(self, name)
         variable = object.__getattribute__(self, 'value')
@@ -201,7 +201,7 @@ class BasicUnit(object):
         self.conversions = dict()
 
     def __repr__(self):
-        return 'BasicUnit(%s)'%self.name
+        return 'BasicUnit(%s)' % self.name
 
     def __str__(self):
         return self.fullname
@@ -311,24 +311,23 @@ def rad_fn(x, pos=None):
     elif n == 2:
         return r'$\pi$'
     elif n % 2 == 0:
-        return r'$%s\pi$' % (n/2,)
+        return r'$%s\pi$' % (n//2,)
     else:
         return r'$%s\pi/2$' % (n,)
 
 
 class BasicUnitConverter(units.ConversionInterface):
-
     @staticmethod
     def axisinfo(unit, axis):
         'return AxisInfo instance for x and unit'
 
-        if unit==radians:
+        if unit == radians:
             return units.AxisInfo(
                 majloc=ticker.MultipleLocator(base=np.pi/2),
                 majfmt=ticker.FuncFormatter(rad_fn),
                 label=unit.fullname,
             )
-        elif unit==degrees:
+        elif unit == degrees:
             return units.AxisInfo(
                 majloc=ticker.AutoLocator(),
                 majfmt=ticker.FormatStrFormatter(r'$%i^\circ$'),

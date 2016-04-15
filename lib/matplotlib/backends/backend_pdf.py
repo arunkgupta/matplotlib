@@ -1,53 +1,51 @@
-# -*- coding: iso-8859-1 -*-
+# -*- coding: utf-8 -*-
 
 """
 A PDF matplotlib backend
-Author: Jouni K Sepp‰nen <jks@iki.fi>
+Author: Jouni K Sepp√§nen <jks@iki.fi>
 """
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import map
+from matplotlib.externals import six
 
 import codecs
 import os
 import re
+import struct
 import sys
 import time
 import warnings
 import zlib
+from io import BytesIO
 
 import numpy as np
-from six import unichr
-from six import BytesIO
+from matplotlib.externals.six import unichr
+
 
 from datetime import datetime
 from math import ceil, cos, floor, pi, sin
-try:
-    set
-except NameError:
-    from sets import Set as set
 
 import matplotlib
 from matplotlib import __version__, rcParams
 from matplotlib._pylab_helpers import Gcf
-from matplotlib.backend_bases import RendererBase, GraphicsContextBase,\
-    FigureManagerBase, FigureCanvasBase
+from matplotlib.backend_bases import (RendererBase, GraphicsContextBase,
+                                      FigureManagerBase, FigureCanvasBase)
 from matplotlib.backends.backend_mixed import MixedModeRenderer
-from matplotlib.cbook import Bunch, is_string_like, \
-    get_realpath_and_stat, is_writable_file_like, maxdict
-from matplotlib.mlab import quad2cubic
+from matplotlib.cbook import (Bunch, is_string_like, get_realpath_and_stat,
+                              is_writable_file_like, maxdict)
 from matplotlib.figure import Figure
-from matplotlib.font_manager import findfont, is_opentype_cff_font
+from matplotlib.font_manager import findfont, is_opentype_cff_font, get_font
 from matplotlib.afm import AFM
 import matplotlib.type1font as type1font
 import matplotlib.dviread as dviread
-from matplotlib.ft2font import FT2Font, FIXED_WIDTH, ITALIC, LOAD_NO_SCALE, \
-    LOAD_NO_HINTING, KERNING_UNFITTED
+from matplotlib.ft2font import (FIXED_WIDTH, ITALIC, LOAD_NO_SCALE,
+                                LOAD_NO_HINTING, KERNING_UNFITTED)
 from matplotlib.mathtext import MathTextParser
 from matplotlib.transforms import Affine2D, BboxBase
 from matplotlib.path import Path
+from matplotlib import _path
+from matplotlib import _png
 from matplotlib import ttconv
 
 # Overview
@@ -92,8 +90,6 @@ from matplotlib import ttconv
 
 # TODOs:
 #
-# * the alpha channel of images
-# * image compression could be improved (PDF supports png-like compression)
 # * encoding of fonts, including mathtext fonts and unicode support
 # * TTF support has lots of small TODOs, e.g., how do you know if a font
 #   is serif/sans-serif, or symbolic/non-symbolic?
@@ -287,6 +283,17 @@ class Operator(object):
     def pdfRepr(self):
         return self.op
 
+
+class Verbatim(object):
+    """Store verbatim PDF command content for later inclusion in the
+    stream."""
+    def __init__(self, x):
+        self._x = x
+
+    def pdfRepr(self):
+        return self._x
+
+
 # PDF operators (not an exhaustive list)
 _pdfops = dict(
     close_fill_stroke=b'b', fill_stroke=b'B', fill=b'f', closepath=b'h',
@@ -304,24 +311,17 @@ Op = Bunch(**dict([(name, Operator(value))
                    for name, value in six.iteritems(_pdfops)]))
 
 
-def _paint_path(closep, fillp, strokep):
+def _paint_path(fill, stroke):
     """Return the PDF operator to paint a path in the following way:
-    closep:  close the path before painting
-    fillp:   fill the path with the fill color
-    strokep: stroke the outline of the path with the line color"""
-    if strokep:
-        if closep:
-            if fillp:
-                return Op.close_fill_stroke
-            else:
-                return Op.close_stroke
+    fill:   fill the path with the fill color
+    stroke: stroke the outline of the path with the line color"""
+    if stroke:
+        if fill:
+            return Op.fill_stroke
         else:
-            if fillp:
-                return Op.fill_stroke
-            else:
-                return Op.stroke
+            return Op.stroke
     else:
-        if fillp:
+        if fill:
             return Op.fill
         else:
             return Op.endpath
@@ -336,11 +336,12 @@ class Stream(object):
     """
     __slots__ = ('id', 'len', 'pdfFile', 'file', 'compressobj', 'extra', 'pos')
 
-    def __init__(self, id, len, file, extra=None):
+    def __init__(self, id, len, file, extra=None, png=None):
         """id: object id of stream; len: an unused Reference object for the
         length of the stream, or None (to use a memory buffer); file:
         a PdfFile; extra: a dictionary of extra key-value pairs to
-        include in the stream header """
+        include in the stream header; png: if the data is already
+        png compressed, the decode parameters"""
         self.id = id            # object id
         self.len = len          # id of length object
         self.pdfFile = file
@@ -349,10 +350,13 @@ class Stream(object):
         if extra is None:
             self.extra = dict()
         else:
-            self.extra = extra
+            self.extra = extra.copy()
+        if png is not None:
+            self.extra.update({'Filter':      Name('FlateDecode'),
+                               'DecodeParms': png})
 
         self.pdfFile.recordXref(self.id)
-        if rcParams['pdf.compression']:
+        if rcParams['pdf.compression'] and not png:
             self.compressobj = zlib.compressobj(rcParams['pdf.compression'])
         if self.len is None:
             self.file = BytesIO()
@@ -462,8 +466,8 @@ class PdfFile(object):
         self.fontNames = {}     # maps filenames to internal font names
         self.nextFont = 1       # next free internal font name
         self.dviFontInfo = {}   # information on dvi fonts
-        self.type1Descriptors = {}  # differently encoded Type-1 fonts may
-                                    # share the same descriptor
+        # differently encoded Type-1 fonts may share the same descriptor
+        self.type1Descriptors = {}
         self.used_characters = {}
 
         self.alphaStates = {}   # maps alpha values to graphics state objects
@@ -472,13 +476,16 @@ class PdfFile(object):
         self.nextHatch = 1
         self.gouraudTriangles = []
 
-        self.images = {}
+        self._images = {}
         self.nextImage = 1
 
         self.markers = {}
         self.multi_byte_charprocs = {}
 
         self.paths = []
+
+        self.pageAnnotations = []  # A list of annotations for the
+                                   # current page
 
         # The PDF spec recommends to include every procset
         procsets = [Name(x)
@@ -507,7 +514,8 @@ class PdfFile(object):
                    'Contents': contentObject,
                    'Group': {'Type': Name('Group'),
                              'S': Name('Transparency'),
-                             'CS': Name('DeviceRGB')}
+                             'CS': Name('DeviceRGB')},
+                   'Annots': self.pageAnnotations,
                    }
         pageObject = self.reserveObject('page')
         self.writeObject(pageObject, thePage)
@@ -519,6 +527,20 @@ class PdfFile(object):
         # graphics context: currently only the join style needs to be set
         self.output(GraphicsContextPdf.joinstyles['round'], Op.setlinejoin)
 
+        # Clear the list of annotations for the next page
+        self.pageAnnotations = []
+
+    def newTextnote(self, text, positionRect=[-100, -100, 0, 0]):
+        # Create a new annotation of type text
+        theNote = {'Type': Name('Annot'),
+                   'Subtype': Name('Text'),
+                   'Contents': text,
+                   'Rect': positionRect,
+                   }
+        annotObject = self.reserveObject('annotation')
+        self.writeObject(annotObject, theNote)
+        self.pageAnnotations.append(annotObject)
+
     def close(self):
         self.endStream()
         # Write out the various deferred objects
@@ -528,7 +550,7 @@ class PdfFile(object):
                                for val in six.itervalues(self.alphaStates)]))
         self.writeHatches()
         self.writeGouraudTriangles()
-        xobjects = dict(six.itervalues(self.images))
+        xobjects = dict(x[1:] for x in six.itervalues(self._images))
         for tup in six.itervalues(self.markers):
             xobjects[tup[0]] = tup[1]
         for name, value in six.iteritems(self.multi_byte_charprocs):
@@ -564,12 +586,12 @@ class PdfFile(object):
             self.currentstream.write(data)
 
     def output(self, *data):
-        self.write(fill(list(map(pdfRepr, data))))
+        self.write(fill([pdfRepr(x) for x in data]))
         self.write(b'\n')
 
-    def beginStream(self, id, len, extra=None):
+    def beginStream(self, id, len, extra=None, png=None):
         assert self.currentstream is None
-        self.currentstream = Stream(id, len, self, extra)
+        self.currentstream = Stream(id, len, self, extra, png)
 
     def endStream(self):
         if self.currentstream is not None:
@@ -735,7 +757,7 @@ class PdfFile(object):
         if 0:
             flags |= 1 << 18
 
-        ft2font = FT2Font(fontfile)
+        ft2font = get_font(fontfile)
 
         descriptor = {
             'Type':        Name('FontDescriptor'),
@@ -751,7 +773,7 @@ class PdfFile(object):
             'FontFamily':  t1font.prop['FamilyName'],
             'StemV':       50,  # TODO
             # (see also revision 3874; but not all TeX distros have AFM files!)
-            #'FontWeight': a number where 400 = Regular, 700 = Bold
+            # 'FontWeight': a number where 400 = Regular, 700 = Bold
             }
 
         self.writeObject(fontdescObject, descriptor)
@@ -795,14 +817,14 @@ end"""
     def embedTTF(self, filename, characters):
         """Embed the TTF font from the named file into the document."""
 
-        font = FT2Font(filename)
+        font = get_font(filename)
         fonttype = rcParams['pdf.fonttype']
 
         def cvt(length, upe=font.units_per_EM, nearest=True):
             "Convert font coordinates to PDF glyph coordinates"
             value = length / upe * 1000
             if nearest:
-                return round(value)
+                return np.round(value)
             # Perhaps best to round away from zero for bounding
             # boxes and the like
             if value < 0:
@@ -861,13 +883,12 @@ end"""
             # Make the "Differences" array, sort the ccodes < 255 from
             # the multi-byte ccodes, and build the whole set of glyph ids
             # that we need from this font.
-            cmap = font.get_charmap()
             glyph_ids = []
             differences = []
             multi_byte_chars = set()
             for c in characters:
                 ccode = c
-                gind = cmap.get(ccode) or 0
+                gind = font.get_char_index(ccode)
                 glyph_ids.append(gind)
                 glyph_name = font.get_glyph_name(gind)
                 if ccode <= 255:
@@ -977,12 +998,11 @@ end"""
             # Make the 'W' (Widths) array, CidToGidMap and ToUnicode CMap
             # at the same time
             cid_to_gid_map = ['\u0000'] * 65536
-            cmap = font.get_charmap()
             widths = []
             max_ccode = 0
             for c in characters:
                 ccode = c
-                gind = cmap.get(ccode) or 0
+                gind = font.get_char_index(ccode)
                 glyph = font.load_char(ccode, flags=LOAD_NO_HINTING)
                 widths.append((ccode, glyph.horiAdvance / 6))
                 if ccode < 65536:
@@ -1153,23 +1173,21 @@ end"""
                  'XStep': sidelen, 'YStep': sidelen,
                  'Resources': res})
 
-            # lst is a tuple of stroke color, fill color,
-            # number of - lines, number of / lines,
-            # number of | lines, number of \ lines
-            rgb = hatch_style[0]
-            self.output(rgb[0], rgb[1], rgb[2], Op.setrgb_stroke)
-            if hatch_style[1] is not None:
-                rgb = hatch_style[1]
-                self.output(rgb[0], rgb[1], rgb[2], Op.setrgb_nonstroke,
+            stroke_rgb, fill_rgb, path = hatch_style
+            self.output(stroke_rgb[0], stroke_rgb[1], stroke_rgb[2],
+                        Op.setrgb_stroke)
+            if fill_rgb is not None:
+                self.output(fill_rgb[0], fill_rgb[1], fill_rgb[2],
+                            Op.setrgb_nonstroke,
                             0, 0, sidelen, sidelen, Op.rectangle,
                             Op.fill)
 
-            self.output(0.1, Op.setlinewidth)
+            self.output(rcParams['hatch.linewidth'], Op.setlinewidth)
 
             # TODO: We could make this dpi-dependent, but that would be
             # an API change
             self.output(*self.pathOperations(
-                Path.hatch(hatch_style[2]),
+                Path.hatch(path),
                 Affine2D().scale(sidelen),
                 simplify=False))
             self.output(Op.stroke)
@@ -1223,80 +1241,114 @@ end"""
     def imageObject(self, image):
         """Return name of an image XObject representing the given image."""
 
-        pair = self.images.get(image, None)
-        if pair is not None:
-            return pair[0]
+        entry = self._images.get(id(image), None)
+        if entry is not None:
+            return entry[1]
 
         name = Name('I%d' % self.nextImage)
         ob = self.reserveObject('image %d' % self.nextImage)
         self.nextImage += 1
-        self.images[image] = (name, ob)
+        self._images[id(image)] = (image, name, ob)
         return name
 
-    ## These two from backend_ps.py
-    ## TODO: alpha (SMask, p. 518 of pdf spec)
+    def _unpack(self, im):
+        """
+        Unpack the image object im into height, width, data, alpha,
+        where data and alpha are HxWx3 (RGB) or HxWx1 (grayscale or alpha)
+        arrays, except alpha is None if the image is fully opaque.
+        """
+        h, w = im.shape[:2]
+        im = im[::-1]
+        if im.ndim == 2:
+            return h, w, im, None
+        else:
+            rgb = im[:, :, :3]
+            rgb = np.array(rgb, order='C')
+            # PDF needs a separate alpha image
+            if im.shape[2] == 4:
+                alpha = im[:, :, 3][..., None]
+                if np.all(alpha == 255):
+                    alpha = None
+                else:
+                    alpha = np.array(alpha, order='C')
+            else:
+                alpha = None
+            return h, w, rgb, alpha
 
-    def _rgb(self, im):
-        h, w, s = im.as_rgba_str()
+    def _writePng(self, data):
+        """
+        Write the image *data* into the pdf file using png
+        predictors with Flate compression.
+        """
 
-        rgba = np.fromstring(s, np.uint8)
-        rgba.shape = (h, w, 4)
-        rgb = rgba[:, :, :3]
-        a = rgba[:, :, 3:]
-        return h, w, rgb.tostring(), a.tostring()
+        buffer = BytesIO()
+        _png.write_png(data, buffer)
+        buffer.seek(8)
+        written = 0
+        header = bytearray(8)
+        while True:
+            n = buffer.readinto(header)
+            assert n == 8
+            length, type = struct.unpack(b'!L4s', bytes(header))
+            if type == b'IDAT':
+                data = bytearray(length)
+                n = buffer.readinto(data)
+                assert n == length
+                self.currentstream.write(bytes(data))
+                written += n
+            elif type == b'IEND':
+                break
+            else:
+                buffer.seek(length, 1)
+            buffer.seek(4, 1)   # skip CRC
 
-    def _gray(self, im, rc=0.3, gc=0.59, bc=0.11):
-        rgbat = im.as_rgba_str()
-        rgba = np.fromstring(rgbat[2], np.uint8)
-        rgba.shape = (rgbat[0], rgbat[1], 4)
-        rgba_f = rgba.astype(np.float32)
-        r = rgba_f[:, :, 0]
-        g = rgba_f[:, :, 1]
-        b = rgba_f[:, :, 2]
-        gray = (r*rc + g*gc + b*bc).astype(np.uint8)
-        return rgbat[0], rgbat[1], gray.tostring()
+    def _writeImg(self, data, height, width, grayscale, id, smask=None):
+        """
+        Write the image *data* of size *height* x *width*, as grayscale
+        if *grayscale* is true and RGB otherwise, as pdf object *id*
+        and with the soft mask (alpha channel) *smask*, which should be
+        either None or a *height* x *width* x 1 array.
+        """
+
+        obj = {'Type':             Name('XObject'),
+               'Subtype':          Name('Image'),
+               'Width':            width,
+               'Height':           height,
+               'ColorSpace':       Name('DeviceGray' if grayscale
+                                        else 'DeviceRGB'),
+               'BitsPerComponent': 8}
+        if smask:
+            obj['SMask'] = smask
+        if rcParams['pdf.compression']:
+            png = {'Predictor': 10,
+                   'Colors':    1 if grayscale else 3,
+                   'Columns':   width}
+        else:
+            png = None
+        self.beginStream(
+            id,
+            self.reserveObject('length of image stream'),
+            obj,
+            png=png
+            )
+        if png:
+            self._writePng(data)
+        else:
+            self.currentstream.write(data.tostring())
+        self.endStream()
 
     def writeImages(self):
-        for img, pair in six.iteritems(self.images):
-            img.flipud_out()
-            if img.is_grayscale:
-                height, width, data = self._gray(img)
-                self.beginStream(
-                    pair[1].id,
-                    self.reserveObject('length of image stream'),
-                    {'Type': Name('XObject'), 'Subtype': Name('Image'),
-                     'Width': width, 'Height': height,
-                     'ColorSpace': Name('DeviceGray'), 'BitsPerComponent': 8})
-                # TODO: predictors (i.e., output png)
-                self.currentstream.write(data)
-                self.endStream()
-            else:
-                height, width, data, adata = self._rgb(img)
+        for img, name, ob in six.itervalues(self._images):
+            height, width, data, adata = self._unpack(img)
+            if adata is not None:
                 smaskObject = self.reserveObject("smask")
-                self.beginStream(
-                    smaskObject.id,
-                    self.reserveObject('length of smask stream'),
-                    {'Type': Name('XObject'), 'Subtype': Name('Image'),
-                     'Width': width, 'Height': height,
-                     'ColorSpace': Name('DeviceGray'), 'BitsPerComponent': 8})
-                # TODO: predictors (i.e., output png)
-                self.currentstream.write(adata)
-                self.endStream()
+                self._writeImg(adata, height, width, True, smaskObject.id)
+            else:
+                smaskObject = None
+            self._writeImg(data, height, width, False,
+                           ob.id, smaskObject)
 
-                self.beginStream(
-                    pair[1].id,
-                    self.reserveObject('length of image stream'),
-                    {'Type': Name('XObject'), 'Subtype': Name('Image'),
-                     'Width': width, 'Height': height,
-                     'ColorSpace': Name('DeviceRGB'), 'BitsPerComponent': 8,
-                     'SMask': smaskObject})
-                # TODO: predictors (i.e., output png)
-                self.currentstream.write(data)
-                self.endStream()
-
-            img.flipud_out()
-
-    def markerObject(self, path, trans, fillp, strokep, lw, joinstyle,
+    def markerObject(self, path, trans, fill, stroke, lw, joinstyle,
                      capstyle):
         """Return name of a marker XObject representing the given path."""
         # self.markers used by markerObject, writeMarkers, close:
@@ -1312,7 +1364,7 @@ end"""
         # first two components of each value in self.markers to be the
         # name and object reference.
         pathops = self.pathOperations(path, trans, simplify=False)
-        key = (tuple(pathops), bool(fillp), bool(strokep), joinstyle, capstyle)
+        key = (tuple(pathops), bool(fill), bool(stroke), joinstyle, capstyle)
         result = self.markers.get(key)
         if result is None:
             name = Name('M%d' % len(self.markers))
@@ -1326,7 +1378,7 @@ end"""
         return name
 
     def writeMarkers(self):
-        for ((pathops, fillp, strokep, joinstyle, capstyle),
+        for ((pathops, fill, stroke, joinstyle, capstyle),
              (name, ob, bbox, lw)) in six.iteritems(self.markers):
             bbox = bbox.padded(lw * 0.5)
             self.beginStream(
@@ -1337,7 +1389,7 @@ end"""
                         Op.setlinejoin)
             self.output(GraphicsContextPdf.capstyles[capstyle], Op.setlinecap)
             self.output(*pathops)
-            self.output(Op.paint_path(False, fillp, strokep))
+            self.output(Op.paint_path(fill, stroke))
             self.endStream()
 
     def pathCollectionObject(self, gc, path, trans, padding, filled, stroked):
@@ -1366,37 +1418,16 @@ end"""
                         Op.setlinejoin)
             self.output(GraphicsContextPdf.capstyles[capstyle], Op.setlinecap)
             self.output(*pathops)
-            self.output(Op.paint_path(False, filled, stroked))
+            self.output(Op.paint_path(filled, stroked))
             self.endStream()
 
     @staticmethod
     def pathOperations(path, transform, clip=None, simplify=None, sketch=None):
-        cmds = []
-        last_points = None
-        for points, code in path.iter_segments(transform, clip=clip,
-                                               simplify=simplify,
-                                               sketch=sketch):
-            if code == Path.MOVETO:
-                # This is allowed anywhere in the path
-                cmds.extend(points)
-                cmds.append(Op.moveto)
-            elif code == Path.CLOSEPOLY:
-                cmds.append(Op.closepath)
-            elif last_points is None:
-                # The other operations require a previous point
-                raise ValueError('Path lacks initial MOVETO')
-            elif code == Path.LINETO:
-                cmds.extend(points)
-                cmds.append(Op.lineto)
-            elif code == Path.CURVE3:
-                points = quad2cubic(*(list(last_points[-2:]) + list(points)))
-                cmds.extend(points[2:])
-                cmds.append(Op.curveto)
-            elif code == Path.CURVE4:
-                cmds.extend(points)
-                cmds.append(Op.curveto)
-            last_points = points
-        return cmds
+        return [Verbatim(_path.convert_to_string(
+            path, transform, clip, simplify, sketch,
+            6,
+            [Op.moveto.op, Op.lineto.op, b'', Op.curveto.op, Op.closepath.op],
+            True))]
 
     def writePath(self, path, transform, clip=False, sketch=None):
         if clip:
@@ -1453,9 +1484,12 @@ end"""
     def writeInfoDict(self):
         """Write out the info dictionary, checking it for good form"""
 
-        is_date = lambda x: isinstance(x, datetime)
+        def is_date(x):
+            return isinstance(x, datetime)
+
         check_trapped = (lambda x: isinstance(x, Name) and
                          x.name in ('True', 'False', 'Unknown'))
+
         keywords = {'Title': is_string_like,
                     'Author': is_string_like,
                     'Subject': is_string_like,
@@ -1489,11 +1523,12 @@ end"""
 
 
 class RendererPdf(RendererBase):
-    truetype_font_cache = maxdict(50)
     afm_font_cache = maxdict(50)
 
-    def __init__(self, file, image_dpi):
+    def __init__(self, file, image_dpi, height, width):
         RendererBase.__init__(self)
+        self.height = height
+        self.width = width
         self.file = file
         self.gc = self.new_gc()
         self.mathtext_parser = MathTextParser("Pdf")
@@ -1557,20 +1592,26 @@ class RendererPdf(RendererBase):
         """
         return True
 
-    def draw_image(self, gc, x, y, im, dx=None, dy=None, transform=None):
+    def option_image_nocomposite(self):
+        """
+        return whether to generate a composite image from multiple images on
+        a set of axes
+        """
+        return not rcParams['image.composite_image']
+
+    def draw_image(self, gc, x, y, im, transform=None):
+        h, w = im.shape[:2]
+        if w == 0 or h == 0:
+            return
+
+        if transform is None:
+            # If there's no transform, alpha has already been applied
+            gc.set_alpha(1.0)
+
         self.check_gc(gc)
 
-        h, w = im.get_size_out()
-
-        if dx is None:
-            w = 72.0*w/self.image_dpi
-        else:
-            w = dx
-
-        if dy is None:
-            h = 72.0*h/self.image_dpi
-        else:
-            h = dy
+        w = 72.0 * w / self.image_dpi
+        h = 72.0 * h / self.image_dpi
 
         imob = self.file.imageObject(im)
 
@@ -1579,11 +1620,11 @@ class RendererPdf(RendererBase):
                              w, 0, 0, h, x, y, Op.concat_matrix,
                              imob, Op.use_xobject, Op.grestore)
         else:
-            tr1, tr2, tr3, tr4, tr5, tr6 = transform.to_values()
+            tr1, tr2, tr3, tr4, tr5, tr6 = transform.frozen().to_values()
 
             self.file.output(Op.gsave,
+                             1, 0, 0, 1, x, y, Op.concat_matrix,
                              tr1, tr2, tr3, tr4, tr5, tr6, Op.concat_matrix,
-                             w, 0, 0, h, x, y, Op.concat_matrix,
                              imob, Op.use_xobject, Op.grestore)
 
     def draw_path(self, gc, path, transform, rgbFace=None):
@@ -1617,12 +1658,24 @@ class RendererPdf(RendererBase):
         if not len(edgecolors):
             stroked = False
         else:
-            if np.all(edgecolors[:, 3] == edgecolors[0, 3]):
+            if np.all(np.asarray(linewidths) == 0.0):
+                stroked = False
+            elif np.all(edgecolors[:, 3] == edgecolors[0, 3]):
                 stroked = edgecolors[0, 3] != 0.0
             else:
                 can_do_optimization = False
 
-        if not can_do_optimization:
+        # Is the optimization worth it? Rough calculation:
+        # cost of emitting a path in-line is len_path * uses_per_path
+        # cost of XObject is len_path + 5 for the definition,
+        #    uses_per_path for the uses
+        len_path = len(paths[0].vertices) if len(paths) > 0 else 0
+        uses_per_path = self._iter_collection_uses_per_path(
+            paths, all_transforms, offsets, facecolors, edgecolors)
+        should_do_optimization = \
+            len_path + uses_per_path + 5 < len_path * uses_per_path
+
+        if (not can_do_optimization) or (not should_do_optimization):
             return RendererBase.draw_path_collection(
                 self, gc, master_transform, paths, all_transforms,
                 offsets, offsetTrans, facecolors, edgecolors,
@@ -1654,20 +1707,21 @@ class RendererPdf(RendererBase):
 
     def draw_markers(self, gc, marker_path, marker_trans, path, trans,
                      rgbFace=None):
-        # For simple paths or small numbers of markers, don't bother
-        # making an XObject
-        if len(path) * len(marker_path) <= 10:
+        # Same logic as in draw_path_collection
+        len_marker_path = len(marker_path)
+        uses = len(path)
+        if len_marker_path * uses < len_marker_path + uses + 5:
             RendererBase.draw_markers(self, gc, marker_path, marker_trans,
                                       path, trans, rgbFace)
             return
 
         self.check_gc(gc, rgbFace)
-        fillp = gc.fillp(rgbFace)
-        strokep = gc.strokep()
+        fill = gc.fill(rgbFace)
+        stroke = gc.stroke()
 
         output = self.file.output
         marker = self.file.markerObject(
-            marker_path, marker_trans, fillp, strokep, self.gc._linewidth,
+            marker_path, marker_trans, fill, stroke, self.gc._linewidth,
             gc.get_joinstyle(), gc.get_capstyle())
 
         output(Op.gsave)
@@ -1678,10 +1732,8 @@ class RendererPdf(RendererBase):
                 simplify=False):
             if len(vertices):
                 x, y = vertices[-2:]
-                if (x < 0 or
-                    y < 0 or
-                    x > self.file.width * 72 or
-                    y > self.file.height * 72):
+                if (x < 0 or y < 0 or
+                        x > self.file.width * 72 or y > self.file.height * 72):
                     continue
                 dx, dy = x - lastx, y - lasty
                 output(1, 0, 0, 1, dx, dy, Op.concat_matrix,
@@ -1790,9 +1842,8 @@ class RendererPdf(RendererBase):
         texmanager = self.get_texmanager()
         fontsize = prop.get_size_in_points()
         dvifile = texmanager.make_dvi(s, fontsize)
-        dvi = dviread.Dvi(dvifile, 72)
-        page = six.next(iter(dvi))
-        dvi.close()
+        with dviread.Dvi(dvifile, 72) as dvi:
+            page = next(iter(dvi))
 
         # Gather font information and do some setup for combining
         # characters into strings. The variable seq will contain a
@@ -1853,7 +1904,7 @@ class RendererPdf(RendererBase):
             if elt[0] == 'font':
                 self.file.output(elt[1], elt[2], Op.selectfont)
             elif elt[0] == 'text':
-                curx, cury = mytrans.transform((elt[1], elt[2]))
+                curx, cury = mytrans.transform_point((elt[1], elt[2]))
                 self._setup_textpos(curx, cury, angle, oldx, oldy)
                 oldx, oldy = curx, cury
                 if len(elt[3]) == 1:
@@ -1938,8 +1989,8 @@ class RendererPdf(RendererBase):
                             chunks[-1][1].append(c)
                         else:
                             chunks.append((char_type, [c]))
-                    use_simple_method = (len(chunks) == 1
-                                         and chunks[-1][0] == 1)
+                    use_simple_method = (len(chunks) == 1 and
+                                         chunks[-1][0] == 1)
             return use_simple_method, chunks
 
         def draw_text_simple():
@@ -1957,7 +2008,6 @@ class RendererPdf(RendererBase):
             between chunks of 1-byte characters and 2-byte characters.
             Only used for Type 3 fonts."""
             chunks = [(a, ''.join(b)) for a, b in chunks]
-            cmap = font.get_charmap()
 
             # Do the rotation and global translation as a single matrix
             # concatenation up front
@@ -1987,7 +2037,7 @@ class RendererPdf(RendererBase):
                     lastgind = None
                     for c in chunk:
                         ccode = ord(c)
-                        gind = cmap.get(ccode)
+                        gind = font.get_char_index(ccode)
                         if gind is not None:
                             if mode == 2 and chunk_type == 2:
                                 glyph_name = font.get_glyph_name(gind)
@@ -2072,15 +2122,8 @@ class RendererPdf(RendererBase):
         return font
 
     def _get_font_ttf(self, prop):
-        key = hash(prop)
-        font = self.truetype_font_cache.get(key)
-        if font is None:
-            filename = findfont(prop)
-            font = self.truetype_font_cache.get(filename)
-            if font is None:
-                font = FT2Font(filename)
-                self.truetype_font_cache[filename] = font
-            self.truetype_font_cache[key] = font
+        filename = findfont(prop)
+        font = get_font(filename)
         font.clear()
         font.set_size(prop.get_size_in_points(), 72)
         return font
@@ -2089,7 +2132,7 @@ class RendererPdf(RendererBase):
         return False
 
     def get_canvas_width_height(self):
-        return self.file.width / 72.0, self.file.height / 72.0
+        return self.file.width * 72.0, self.file.height * 72.0
 
     def new_gc(self):
         return GraphicsContextPdf(self.file)
@@ -2110,7 +2153,7 @@ class GraphicsContextPdf(GraphicsContextBase):
         del d['parent']
         return repr(d)
 
-    def strokep(self):
+    def stroke(self):
         """
         Predicate: does the path need to be stroked (its outline drawn)?
         This tests for the various conditions that disable stroking
@@ -2121,7 +2164,7 @@ class GraphicsContextPdf(GraphicsContextBase):
         return (self._linewidth > 0 and self._alpha > 0 and
                 (len(self._rgb) <= 3 or self._rgb[3] != 0.0))
 
-    def fillp(self, *args):
+    def fill(self, *args):
         """
         Predicate: does the path need to be filled?
 
@@ -2136,19 +2179,12 @@ class GraphicsContextPdf(GraphicsContextBase):
                 (_fillcolor is not None and
                  (len(_fillcolor) <= 3 or _fillcolor[3] != 0.0)))
 
-    def close_and_paint(self):
-        """
-        Return the appropriate pdf operator to close the path and
-        cause it to be stroked, filled, or both.
-        """
-        return Op.paint_path(True, self.fillp(), self.strokep())
-
     def paint(self):
         """
         Return the appropriate pdf operator to cause the path to be
         stroked, filled, or both.
         """
-        return Op.paint_path(False, self.fillp(), self.strokep())
+        return Op.paint_path(self.fill(), self.stroke())
 
     capstyles = {'butt': 0, 'round': 1, 'projecting': 2}
     joinstyles = {'miter': 0, 'round': 1, 'bevel': 2}
@@ -2223,7 +2259,7 @@ class GraphicsContextPdf(GraphicsContextBase):
             cmds.extend(self.pop())
         # Unless we hit the right one, set the clip polygon
         if ((self._cliprect, self._clippath) != (cliprect, clippath) or
-            self.parent is None):
+                self.parent is None):
             cmds.extend(self.push())
             if self._cliprect != cliprect:
                 cmds.extend([cliprect, Op.rectangle, Op.clip, Op.endpath])
@@ -2255,13 +2291,17 @@ class GraphicsContextPdf(GraphicsContextBase):
         needed to transform self into other.
         """
         cmds = []
+        fill_performed = False
         for params, cmd in self.commands:
             different = False
             for p in params:
                 ours = getattr(self, p)
                 theirs = getattr(other, p)
                 try:
-                    different = bool(ours != theirs)
+                    if (ours is None or theirs is None):
+                        different = bool(not(ours is theirs))
+                    else:
+                        different = bool(ours != theirs)
                 except ValueError:
                     ours = np.asarray(ours)
                     theirs = np.asarray(theirs)
@@ -2270,7 +2310,13 @@ class GraphicsContextPdf(GraphicsContextBase):
                 if different:
                     break
 
+            # Need to update hatching if we also updated fillcolor
+            if params == ('_hatch',) and fill_performed:
+                different = True
+
             if different:
+                if params == ('_fillcolor',):
+                    fill_performed = True
                 theirs = [getattr(other, p) for p in params]
                 cmds.extend(cmd(self, *theirs))
                 for p in params:
@@ -2382,7 +2428,8 @@ class PdfPages(object):
         PDF file.
         """
         self._file.close()
-        if self.get_pagecount() == 0 and self.keep_empty is False:
+        if (self.get_pagecount() == 0 and not self.keep_empty and
+                not self._file.passed_in_file_object):
             os.remove(self._file.fh.name)
         self._file = None
 
@@ -2429,6 +2476,15 @@ class PdfPages(object):
         """
         return len(self._file.pageList)
 
+    def attach_note(self, text, positionRect=[-100, -100, 0, 0]):
+        """
+        Add a new text note to the page to be saved next. The optional
+        positionRect specifies the position of the new note on the
+        page. It is outside the page per default to make sure it is
+        invisible on printouts.
+        """
+        self._file.newTextnote(text, positionRect)
+
 
 class FigureCanvasPdf(FigureCanvasBase):
     """
@@ -2463,7 +2519,7 @@ class FigureCanvasPdf(FigureCanvasBase):
             _bbox_inches_restore = kwargs.pop("bbox_inches_restore", None)
             renderer = MixedModeRenderer(
                 self.figure, width, height, image_dpi,
-                RendererPdf(file, image_dpi),
+                RendererPdf(file, image_dpi, height, width),
                 bbox_inches_restore=_bbox_inches_restore)
             self.figure.draw(renderer)
             renderer.finalize()

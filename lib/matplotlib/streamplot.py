@@ -5,8 +5,8 @@ Streamline plotting for 2D vector fields.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import xrange
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import xrange
 
 import numpy as np
 import matplotlib
@@ -21,7 +21,7 @@ __all__ = ['streamplot']
 
 def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
                cmap=None, norm=None, arrowsize=1, arrowstyle='-|>',
-               minlength=0.1, transform=None, zorder=1):
+               minlength=0.1, transform=None, zorder=2, start_points=None):
     """Draws streamlines of a vector flow.
 
     *x*, *y* : 1d arrays
@@ -52,6 +52,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         See :class:`~matplotlib.patches.FancyArrowPatch`.
     *minlength* : float
         Minimum length of streamline in axes coordinates.
+    *start_points*: Nx2 array
+        Coordinates of starting points for the streamlines.
+        In data coordinates, the same as the ``x`` and ``y`` arrays.
     *zorder* : int
         any number
 
@@ -79,8 +82,8 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     if transform is None:
         transform = axes.transData
 
-    if color is None:
-        color = six.next(axes._get_lines.color_cycle)
+    if color is None and 'color' in axes._get_lines._prop_keys:
+        color = six.next(axes._get_lines.prop_cycler)['color']
 
     if linewidth is None:
         linewidth = matplotlib.rcParams['lines.linewidth']
@@ -90,7 +93,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
 
     use_multicolor_lines = isinstance(color, np.ndarray)
     if use_multicolor_lines:
-        assert color.shape == grid.shape
+        if color.shape != grid.shape:
+            msg = "If 'color' is given, must have the shape of 'Grid(x,y)'"
+            raise ValueError(msg)
         line_colors = []
         color = np.ma.masked_invalid(color)
     else:
@@ -98,7 +103,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         arrow_kw['color'] = color
 
     if isinstance(linewidth, np.ndarray):
-        assert linewidth.shape == grid.shape
+        if linewidth.shape != grid.shape:
+            msg = "If 'linewidth' is given, must have the shape of 'Grid(x,y)'"
+            raise ValueError(msg)
         line_kw['linewidth'] = []
     else:
         line_kw['linewidth'] = linewidth
@@ -108,8 +115,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     arrow_kw['zorder'] = zorder
 
     ## Sanity checks.
-    assert u.shape == grid.shape
-    assert v.shape == grid.shape
+    if (u.shape != grid.shape) or (v.shape != grid.shape):
+        msg = "'u' and 'v' must be of shape 'Grid(x,y)'"
+        raise ValueError(msg)
 
     u = np.ma.masked_invalid(u)
     v = np.ma.masked_invalid(v)
@@ -117,9 +125,31 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     integrate = get_integrator(u, v, dmap, minlength)
 
     trajectories = []
-    for xm, ym in _gen_starting_points(mask.shape):
-        if mask[ym, xm] == 0:
-            xg, yg = dmap.mask2grid(xm, ym)
+    if start_points is None:
+        for xm, ym in _gen_starting_points(mask.shape):
+            if mask[ym, xm] == 0:
+                xg, yg = dmap.mask2grid(xm, ym)
+                t = integrate(xg, yg)
+                if t is not None:
+                    trajectories.append(t)
+    else:
+        sp2 = np.asanyarray(start_points, dtype=np.float).copy()
+
+        # Check if start_points are outside the data boundaries
+        for xs, ys in sp2:
+            if (xs < grid.x_origin or xs > grid.x_origin + grid.width
+                or ys < grid.y_origin or ys > grid.y_origin + grid.height):
+                    raise ValueError("Starting point ({}, {}) outside of"
+                                     " data boundaries".format(xs, ys))
+
+        # Convert start_points from data to array coords
+        # Shift the seed points from the bottom left of the data so that
+        # data2grid works properly.
+        sp2[:, 0] -= grid.x_origin
+        sp2[:, 1] -= grid.y_origin
+
+        for xs, ys in sp2:
+            xg, yg = dmap.data2grid(xs, ys)
             t = integrate(xg, yg)
             if t is not None:
                 trajectories.append(t)
@@ -138,8 +168,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         tgx = np.array(t[0])
         tgy = np.array(t[1])
         # Rescale from grid-coordinates to data-coordinates.
-        tx = np.array(t[0]) * grid.dx + grid.x_origin
-        ty = np.array(t[1]) * grid.dy + grid.y_origin
+        tx, ty = dmap.grid2data(*np.array(t))
+        tx += grid.x_origin
+        ty += grid.y_origin
 
         points = np.transpose([tx, ty]).reshape(-1, 1, 2)
         streamlines.extend(np.hstack([points[:-1], points[1:]]))
@@ -163,12 +194,14 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         p = patches.FancyArrowPatch(arrow_tail,
                                     arrow_head,
                                     transform=transform,
+                                    margins=False,
                                     **arrow_kw)
         axes.add_patch(p)
         arrows.append(p)
 
     lc = mcollections.LineCollection(streamlines,
                                      transform=transform,
+                                     margins=False,
                                      **line_kw)
     if use_multicolor_lines:
         lc.set_array(np.ma.hstack(line_colors))
@@ -177,7 +210,7 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     axes.add_collection(lc)
     axes.autoscale_view()
 
-    ac = matplotlib.collections.PatchCollection(arrows)
+    ac = matplotlib.collections.PatchCollection(arrows, margins=False)
     stream_container = StreamplotSet(lc, ac)
     return stream_container
 
@@ -190,7 +223,7 @@ class StreamplotSet(object):
 
 
 # Coordinate definitions
-#========================
+# ========================
 
 class DomainMap(object):
     """Map representing different coordinate systems.
@@ -213,26 +246,29 @@ class DomainMap(object):
     def __init__(self, grid, mask):
         self.grid = grid
         self.mask = mask
-        ## Constants for conversion between grid- and mask-coordinates
+        # Constants for conversion between grid- and mask-coordinates
         self.x_grid2mask = float(mask.nx - 1) / grid.nx
         self.y_grid2mask = float(mask.ny - 1) / grid.ny
 
         self.x_mask2grid = 1. / self.x_grid2mask
         self.y_mask2grid = 1. / self.y_grid2mask
 
-        self.x_data2grid = grid.nx / grid.width
-        self.y_data2grid = grid.ny / grid.height
+        self.x_data2grid = 1. / grid.dx
+        self.y_data2grid = 1. / grid.dy
 
     def grid2mask(self, xi, yi):
         """Return nearest space in mask-coords from given grid-coords."""
-        return int((xi * self.x_grid2mask) + 0.5), \
-               int((yi * self.y_grid2mask) + 0.5)
+        return (int((xi * self.x_grid2mask) + 0.5),
+                int((yi * self.y_grid2mask) + 0.5))
 
     def mask2grid(self, xm, ym):
         return xm * self.x_mask2grid, ym * self.y_mask2grid
 
     def data2grid(self, xd, yd):
         return xd * self.x_data2grid, yd * self.y_data2grid
+
+    def grid2data(self, xg, yg):
+        return xg / self.x_data2grid, yg / self.y_data2grid
 
     def start_trajectory(self, xg, yg):
         xm, ym = self.grid2mask(xg, yg)
@@ -256,19 +292,25 @@ class Grid(object):
     """Grid of data."""
     def __init__(self, x, y):
 
-        if len(x.shape) == 2:
-            x_row = x[0]
-            assert np.allclose(x_row, x)
+        if x.ndim == 1:
+            pass
+        elif x.ndim == 2:
+            x_row = x[0, :]
+            if not np.allclose(x_row, x):
+                raise ValueError("The rows of 'x' must be equal")
             x = x_row
         else:
-            assert len(x.shape) == 1
+            raise ValueError("'x' can have at maximum 2 dimensions")
 
-        if len(y.shape) == 2:
+        if y.ndim == 1:
+            pass
+        elif y.ndim == 2:
             y_col = y[:, 0]
-            assert np.allclose(y_col, y.T)
+            if not np.allclose(y_col, y.T):
+                raise ValueError("The columns of 'y' must be equal")
             y = y_col
         else:
-            assert len(y.shape) == 1
+            raise ValueError("'y' can have at maximum 2 dimensions")
 
         self.nx = len(x)
         self.ny = len(y)
@@ -304,10 +346,12 @@ class StreamMask(object):
 
     def __init__(self, density):
         if np.isscalar(density):
-            assert density > 0
+            if density <= 0:
+                raise ValueError("If a scalar, 'density' must be positive")
             self.nx = self.ny = int(30 * density)
         else:
-            assert len(density) == 2
+            if len(density) != 2:
+                raise ValueError("'density' can have at maximum 2 dimensions")
             self.nx = int(30 * density[0])
             self.ny = int(30 * density[1])
         self._mask = np.zeros((self.ny, self.nx))
@@ -387,7 +431,10 @@ def get_integrator(u, v, dmap, minlength):
         resulting trajectory is None if it is shorter than `minlength`.
         """
 
-        dmap.start_trajectory(x0, y0)
+        try:
+            dmap.start_trajectory(x0, y0)
+        except InvalidIndexError:
+            return None
         sf, xf_traj, yf_traj = _integrate_rk12(x0, y0, dmap, forward_time)
         dmap.reset_start_point(x0, y0)
         sb, xb_traj, yb_traj = _integrate_rk12(x0, y0, dmap, backward_time)
@@ -428,17 +475,17 @@ def _integrate_rk12(x0, y0, dmap, f):
     solvers in most setups on my machine. I would recommend removing the
     other two to keep things simple.
     """
-    ## This error is below that needed to match the RK4 integrator. It
-    ## is set for visual reasons -- too low and corners start
-    ## appearing ugly and jagged. Can be tuned.
+    # This error is below that needed to match the RK4 integrator. It
+    # is set for visual reasons -- too low and corners start
+    # appearing ugly and jagged. Can be tuned.
     maxerror = 0.003
 
-    ## This limit is important (for all integrators) to avoid the
-    ## trajectory skipping some mask cells. We could relax this
-    ## condition if we use the code which is commented out below to
-    ## increment the location gradually. However, due to the efficient
-    ## nature of the interpolation, this doesn't boost speed by much
-    ## for quite a bit of complexity.
+    # This limit is important (for all integrators) to avoid the
+    # trajectory skipping some mask cells. We could relax this
+    # condition if we use the code which is commented out below to
+    # increment the location gradually. However, due to the efficient
+    # nature of the interpolation, this doesn't boost speed by much
+    # for quite a bit of complexity.
     maxds = min(1. / dmap.mask.nx, 1. / dmap.mask.ny, 0.1)
 
     ds = maxds
@@ -519,7 +566,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
 
 
 # Utility functions
-#========================
+# ========================
 
 def interpgrid(a, xi, yi):
     """Fast 2D, linear interpolation on an integer grid"""

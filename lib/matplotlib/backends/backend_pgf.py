@@ -1,11 +1,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
+from matplotlib.externals import six
 
 import math
 import os
 import sys
+import errno
 import re
 import shutil
 import tempfile
@@ -13,6 +14,8 @@ import codecs
 import atexit
 import weakref
 import warnings
+
+import numpy as np
 
 import matplotlib as mpl
 from matplotlib.backend_bases import RendererBase, GraphicsContextBase,\
@@ -33,10 +36,9 @@ from matplotlib.compat.subprocess import check_output
 system_fonts = []
 if sys.platform.startswith('win'):
     from matplotlib import font_manager
-    from matplotlib.ft2font import FT2Font
     for f in font_manager.win32InstalledFonts():
         try:
-            system_fonts.append(FT2Font(str(f)).family_name)
+            system_fonts.append(font_manager.get_font(str(f)).family_name)
         except:
             pass # unknown error, skip this font
 else:
@@ -212,7 +214,7 @@ class LatexError(Exception):
         self.latex_output = latex_output
 
 
-class LatexManagerFactory:
+class LatexManagerFactory(object):
     previous_instance = None
 
     @staticmethod
@@ -233,31 +235,14 @@ class LatexManagerFactory:
             LatexManagerFactory.previous_instance = new_inst
             return new_inst
 
-class WeakSet:
-    # TODO: Poor man's weakref.WeakSet.
-    #       Remove this once python 2.6 support is dropped from matplotlib.
 
-    def __init__(self):
-        self.weak_key_dict = weakref.WeakKeyDictionary()
-
-    def add(self, item):
-        self.weak_key_dict[item] = None
-
-    def discard(self, item):
-        if item in self.weak_key_dict:
-            del self.weak_key_dict[item]
-
-    def __iter__(self):
-        return six.iterkeys(self.weak_key_dict)
-
-
-class LatexManager:
+class LatexManager(object):
     """
     The LatexManager opens an instance of the LaTeX application for
     determining the metrics of text elements. The LaTeX environment can be
     modified by setting fonts and/or a custem preamble in the rc parameters.
     """
-    _unclean_instances = WeakSet()
+    _unclean_instances = weakref.WeakSet()
 
     @staticmethod
     def _build_latex_header():
@@ -301,6 +286,11 @@ class LatexManager:
         return self._expect("\n*")
 
     def __init__(self):
+        # store references for __del__
+        self._os_path = os.path
+        self._shutil = shutil
+        self._debug = rcParams.get("pgf.debug", False)
+
         # create a tmp directory for running latex, remember to cleanup
         self.tmpdir = tempfile.mkdtemp(prefix="mpl_pgf_lm_")
         LatexManager._unclean_instances.add(self)
@@ -314,8 +304,14 @@ class LatexManager:
                                      stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE,
                                      cwd=self.tmpdir)
-        except OSError:
-            raise RuntimeError("Error starting process '%s'" % self.texcommand)
+        except OSError as e:
+            if e.errno == errno.ENOENT:
+                raise RuntimeError("Latex command not found. "
+                    "Install '%s' or change pgf.texsystem to the desired command."
+                    % self.texcommand
+                )
+            else:
+                raise RuntimeError("Error starting process '%s'" % self.texcommand)
         test_input = self.latex_header + latex_end
         stdout, stderr = latex.communicate(test_input.encode("utf-8"))
         if latex.returncode != 0:
@@ -337,22 +333,22 @@ class LatexManager:
         self.str_cache = {}
 
     def _cleanup(self):
-        if not os.path.isdir(self.tmpdir):
+        if not self._os_path.isdir(self.tmpdir):
             return
         try:
-            self.latex_stdin_utf8.close()
             self.latex.communicate()
-            self.latex.wait()
+            self.latex_stdin_utf8.close()
+            self.latex.stdout.close()
         except:
             pass
         try:
-            shutil.rmtree(self.tmpdir)
+            self._shutil.rmtree(self.tmpdir)
             LatexManager._unclean_instances.discard(self)
         except:
             sys.stderr.write("error deleting tmp directory %s\n" % self.tmpdir)
 
     def __del__(self):
-        if rcParams.get("pgf.debug", False):
+        if self._debug:
             print("deleting LatexManager")
         self._cleanup()
 
@@ -429,7 +425,10 @@ class RendererPgf(RendererBase):
                     self.__dict__[m] = nop
         else:
             # if fh does not belong to a filename, deactivate draw_image
-            if not os.path.exists(fh.name):
+            if not hasattr(fh, 'name') or not os.path.exists(fh.name):
+                warnings.warn("streamed pgf-code does not support raster "
+                              "graphics, consider using the pgf-to-pdf option",
+                              UserWarning)
                 self.__dict__["draw_image"] = lambda *args, **kwargs: None
 
     def draw_markers(self, gc, marker_path, marker_trans, path, trans, rgbFace=None):
@@ -466,7 +465,7 @@ class RendererPgf(RendererBase):
         # draw the path
         self._print_pgf_clip(gc)
         self._print_pgf_path_styles(gc, rgbFace)
-        self._print_pgf_path(gc, path, transform)
+        self._print_pgf_path(gc, path, transform, rgbFace)
         self._pgf_path_draw(stroke=gc.get_linewidth() != 0.0,
                             fill=rgbFace is not None)
         writeln(self.fh, r"\end{pgfscope}")
@@ -478,7 +477,7 @@ class RendererPgf(RendererBase):
 
             # combine clip and path for clipping
             self._print_pgf_clip(gc)
-            self._print_pgf_path(gc, path, transform)
+            self._print_pgf_path(gc, path, transform, rgbFace)
             writeln(self.fh, r"\pgfusepath{clip}")
 
             # build pattern definition
@@ -572,11 +571,11 @@ class RendererPgf(RendererBase):
             dash_str += r"}{%fpt}" % dash_offset
             writeln(self.fh, dash_str)
 
-    def _print_pgf_path(self, gc, path, transform):
+    def _print_pgf_path(self, gc, path, transform, rgbFace=None):
         f = 1. / self.dpi
-        # check for clip box
+        # check for clip box / ignore clip for filled paths
         bbox = gc.get_clip_rectangle() if gc else None
-        if bbox:
+        if bbox and (rgbFace is None):
             p1, p2 = bbox.get_points()
             clip = (p1[0], p1[1], p2[0], p2[1])
         else:
@@ -619,14 +618,12 @@ class RendererPgf(RendererBase):
         fname = os.path.splitext(os.path.basename(self.fh.name))[0]
         fname_img = "%s-img%d.png" % (fname, self.image_counter)
         self.image_counter += 1
-        im.flipud_out()
-        rows, cols, buf = im.as_rgba_str()
-        _png.write_png(buf, cols, rows, os.path.join(path, fname_img))
+        _png.write_png(im[::-1], os.path.join(path, fname_img))
 
         # reference the image in the pgf picture
         writeln(self.fh, r"\begin{pgfscope}")
         self._print_pgf_clip(gc)
-        h, w = im.get_size_out()
+        h, w = im.shape[:2]
         f = 1. / self.dpi  # from display coords to inch
         writeln(self.fh, r"\pgftext[at=\pgfqpoint{%fin}{%fin},left,bottom]{\pgfimage[interpolate=true,width=%fin,height=%fin]{%s}}" % (x * f, y * f, w * f, h * f, fname_img))
         writeln(self.fh, r"\end{pgfscope}")
@@ -638,7 +635,7 @@ class RendererPgf(RendererBase):
         # prepare string for tex
         s = common_texification(s)
         prop_cmds = _font_properties_str(prop)
-        s = r"{%s %s}" % (prop_cmds, s)
+        s = r"%s %s" % (prop_cmds, s)
 
 
         writeln(self.fh, r"\begin{pgfscope}")
@@ -652,10 +649,14 @@ class RendererPgf(RendererBase):
             writeln(self.fh, r"\definecolor{textcolor}{rgb}{%f,%f,%f}" % rgb)
             writeln(self.fh, r"\pgfsetstrokecolor{textcolor}")
             writeln(self.fh, r"\pgfsetfillcolor{textcolor}")
+            s = r"\color{textcolor}" + s
 
         f = 1.0 / self.figure.dpi
         text_args = []
-        if mtext and (angle == 0 or mtext.get_rotation_mode() == "anchor"):
+        if mtext and (
+                (angle == 0 or
+                 mtext.get_rotation_mode() == "anchor") and
+                mtext.get_va() != "center_baseline"):
             # if text anchoring can be supported, get the original coordinates
             # and add alignment information
             x, y = mtext.get_transform().transform_point(mtext.get_position())
@@ -737,7 +738,7 @@ def new_figure_manager_given_figure(num, figure):
     return manager
 
 
-class TmpDirCleaner:
+class TmpDirCleaner(object):
     remaining_tmpdirs = set()
 
     @staticmethod
@@ -757,9 +758,6 @@ class FigureCanvasPgf(FigureCanvasBase):
     filetypes = {"pgf": "LaTeX PGF picture",
                  "pdf": "LaTeX compiled PGF picture",
                  "png": "Portable Network Graphics", }
-
-    def __init__(self, *args):
-        FigureCanvasBase.__init__(self, *args)
 
     def get_default_filetype(self):
         return 'pdf'
@@ -834,11 +832,8 @@ class FigureCanvasPgf(FigureCanvasBase):
             with codecs.open(fname_or_fh, "w", encoding="utf-8") as fh:
                 self._print_pgf_to_fh(fh, *args, **kwargs)
         elif is_writable_file_like(fname_or_fh):
-            if not os.path.exists(fname_or_fh.name):
-                warnings.warn("streamed pgf-code does not support raster "
-                              "graphics, consider using the pgf-to-pdf option",
-                              UserWarning)
-            self._print_pgf_to_fh(fname_or_fh, *args, **kwargs)
+            fh = codecs.getwriter("utf-8")(fname_or_fh)
+            self._print_pgf_to_fh(fh, *args, **kwargs)
         else:
             raise ValueError("filename must be a path")
 

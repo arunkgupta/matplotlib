@@ -9,8 +9,10 @@ it imports matplotlib only at runtime.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-from six.moves import xrange
+from matplotlib.externals import six
+from matplotlib.externals.six.moves import xrange, zip
+from itertools import repeat
+import collections
 
 import datetime
 import errno
@@ -22,7 +24,6 @@ import locale
 import os
 import re
 import sys
-import threading
 import time
 import traceback
 import types
@@ -122,9 +123,12 @@ def warn_deprecated(
 
     Examples
     --------
-    # To warn of the deprecation of "matplotlib.name_of_module"
-    warn_deprecated('1.4.0', name='matplotlib.name_of_module',
-                    obj_type='module')
+
+        Basic example::
+
+            # To warn of the deprecation of "matplotlib.name_of_module"
+            warn_deprecated('1.4.0', name='matplotlib.name_of_module',
+                            obj_type='module')
 
     """
     message = _generate_deprecation_message(
@@ -174,9 +178,12 @@ def deprecated(since, message='', name='', alternative='', pending=False,
 
     Examples
     --------
-    @deprecated('1.4.0')
-    def the_function_to_deprecate():
-        pass
+
+        Basic example::
+
+            @deprecated('1.4.0')
+            def the_function_to_deprecate():
+                pass
 
     """
     def deprecate(func, message=message, name=name, alternative=alternative,
@@ -185,20 +192,7 @@ def deprecated(since, message='', name='', alternative='', pending=False,
         import textwrap
 
         if isinstance(func, classmethod):
-            try:
-                func = func.__func__
-            except AttributeError:
-                # classmethods in Python2.6 and below lack the __func__
-                # attribute so we need to hack around to get it
-                method = func.__get__(None, object)
-                if hasattr(method, '__func__'):
-                    func = method.__func__
-                elif hasattr(method, 'im_func'):
-                    func = method.im_func
-                else:
-                    # Nothing we can do really...  just return the original
-                    # classmethod
-                    return func
+            func = func.__func__
             is_classmethod = True
         else:
             is_classmethod = False
@@ -354,9 +348,14 @@ class _BoundMethodProxy(object):
     Minor bugfixes by Michael Droettboom
     '''
     def __init__(self, cb):
+        self._hash = hash(cb)
+        self._destroy_callbacks = []
         try:
             try:
-                self.inst = ref(cb.im_self)
+                if six.PY3:
+                    self.inst = ref(cb.__self__, self._destroy)
+                else:
+                    self.inst = ref(cb.im_self, self._destroy)
             except TypeError:
                 self.inst = None
             if six.PY3:
@@ -369,6 +368,16 @@ class _BoundMethodProxy(object):
             self.inst = None
             self.func = cb
             self.klass = None
+
+    def add_destroy_callback(self, callback):
+        self._destroy_callbacks.append(_BoundMethodProxy(callback))
+
+    def _destroy(self, wk):
+        for callback in self._destroy_callbacks:
+            try:
+                callback(self)
+            except ReferenceError:
+                pass
 
     def __getstate__(self):
         d = self.__dict__.copy()
@@ -426,8 +435,11 @@ class _BoundMethodProxy(object):
         '''
         return not self.__eq__(other)
 
+    def __hash__(self):
+        return self._hash
 
-class CallbackRegistry:
+
+class CallbackRegistry(object):
     """
     Handle registering and disconnecting for a set of signals and
     callbacks:
@@ -465,13 +477,7 @@ class CallbackRegistry:
     `"Mindtrove" blog
     <http://mindtrove.info/articles/python-weak-references/>`_.
     """
-    def __init__(self, *args):
-        if len(args):
-            warn_deprecated(
-                '1.3',
-                message="CallbackRegistry no longer requires a list of "
-                        "callback types. Ignoring arguments. *args will "
-                        "be removed in 1.5")
+    def __init__(self):
         self.callbacks = dict()
         self._cid = 0
         self._func_cid_map = {}
@@ -491,16 +497,30 @@ class CallbackRegistry:
         func will be called
         """
         self._func_cid_map.setdefault(s, WeakKeyDictionary())
-        if func in self._func_cid_map[s]:
-            return self._func_cid_map[s][func]
+        # Note proxy not needed in python 3.
+        # TODO rewrite this when support for python2.x gets dropped.
+        proxy = _BoundMethodProxy(func)
+        if proxy in self._func_cid_map[s]:
+            return self._func_cid_map[s][proxy]
 
+        proxy.add_destroy_callback(self._remove_proxy)
         self._cid += 1
         cid = self._cid
-        self._func_cid_map[s][func] = cid
+        self._func_cid_map[s][proxy] = cid
         self.callbacks.setdefault(s, dict())
-        proxy = _BoundMethodProxy(func)
         self.callbacks[s][cid] = proxy
         return cid
+
+    def _remove_proxy(self, proxy):
+        for signal, proxies in list(six.iteritems(self._func_cid_map)):
+            try:
+                del self.callbacks[signal][proxies[proxy]]
+            except KeyError:
+                pass
+
+            if len(self.callbacks[signal]) == 0:
+                del self.callbacks[signal]
+                del self._func_cid_map[signal]
 
     def disconnect(self, cid):
         """
@@ -512,7 +532,7 @@ class CallbackRegistry:
             except KeyError:
                 continue
             else:
-                for category, functions in list(
+                for signal, functions in list(
                         six.iteritems(self._func_cid_map)):
                     for function, value in list(six.iteritems(functions)):
                         if value == cid:
@@ -526,77 +546,10 @@ class CallbackRegistry:
         """
         if s in self.callbacks:
             for cid, proxy in list(six.iteritems(self.callbacks[s])):
-                # Clean out dead references
-                if proxy.inst is not None and proxy.inst() is None:
-                    del self.callbacks[s][cid]
-                else:
+                try:
                     proxy(*args, **kwargs)
-
-
-class Scheduler(threading.Thread):
-    """
-    Base class for timeout and idle scheduling
-    """
-    idlelock = threading.Lock()
-    id = 0
-
-    def __init__(self):
-        threading.Thread.__init__(self)
-        self.id = Scheduler.id
-        self._stopped = False
-        Scheduler.id += 1
-        self._stopevent = threading.Event()
-
-    def stop(self):
-        if self._stopped:
-            return
-        self._stopevent.set()
-        self.join()
-        self._stopped = True
-
-
-class Timeout(Scheduler):
-    """
-    Schedule recurring events with a wait time in seconds
-    """
-    def __init__(self, wait, func):
-        Scheduler.__init__(self)
-        self.wait = wait
-        self.func = func
-
-    def run(self):
-
-        while not self._stopevent.isSet():
-            self._stopevent.wait(self.wait)
-            Scheduler.idlelock.acquire()
-            b = self.func(self)
-            Scheduler.idlelock.release()
-            if not b:
-                break
-
-
-class Idle(Scheduler):
-    """
-    Schedule callbacks when scheduler is idle
-    """
-    # the prototype impl is a bit of a poor man's idle handler.  It
-    # just implements a short wait time.  But it will provide a
-    # placeholder for a proper impl ater
-    waittime = 0.05
-
-    def __init__(self, func):
-        Scheduler.__init__(self)
-        self.func = func
-
-    def run(self):
-
-        while not self._stopevent.isSet():
-            self._stopevent.wait(Idle.waittime)
-            Scheduler.idlelock.acquire()
-            b = self.func(self)
-            Scheduler.idlelock.release()
-            if not b:
-                break
+                except ReferenceError:
+                    self._remove_proxy(proxy)
 
 
 class silent_list(list):
@@ -625,6 +578,62 @@ class silent_list(list):
         self.extend(state['seq'])
 
 
+class IgnoredKeywordWarning(UserWarning):
+    """
+    A class for issuing warnings about keyword arguments that will be ignored
+    by matplotlib
+    """
+    pass
+
+
+def local_over_kwdict(local_var, kwargs, *keys):
+    """
+    Enforces the priority of a local variable over potentially conflicting
+    argument(s) from a kwargs dict. The following possible output values are
+    considered in order of priority:
+
+        local_var > kwargs[keys[0]] > ... > kwargs[keys[-1]]
+
+    The first of these whose value is not None will be returned. If all are
+    None then None will be returned. Each key in keys will be removed from the
+    kwargs dict in place.
+
+    Parameters
+    ------------
+        local_var: any object
+            The local variable (highest priority)
+
+        kwargs: dict
+            Dictionary of keyword arguments; modified in place
+
+        keys: str(s)
+            Name(s) of keyword arguments to process, in descending order of
+            priority
+
+    Returns
+    ---------
+        out: any object
+            Either local_var or one of kwargs[key] for key in keys
+
+    Raises
+    --------
+        IgnoredKeywordWarning
+            For each key in keys that is removed from kwargs but not used as
+            the output value
+
+    """
+    out = local_var
+    for key in keys:
+        kwarg_val = kwargs.pop(key, None)
+        if kwarg_val is not None:
+            if out is None:
+                out = kwarg_val
+            else:
+                warnings.warn('"%s" keyword argument will be ignored' % key,
+                              IgnoredKeywordWarning)
+    return out
+
+
 def strip_math(s):
     'remove latex formatting from mathtext'
     remove = (r'\mathdefault', r'\rm', r'\cal', r'\tt', r'\it', '\\', '{', '}')
@@ -634,7 +643,7 @@ def strip_math(s):
     return s
 
 
-class Bunch:
+class Bunch(object):
     """
     Often we want to just collect a bunch of stuff together, naming each
     item of the bunch; a dictionary's OK for that, but a small do- nothing
@@ -694,11 +703,26 @@ def is_sequence_of_strings(obj):
     """
     if not iterable(obj):
         return False
-    if is_string_like(obj):
-        return False
+    if is_string_like(obj) and not isinstance(obj, np.ndarray):
+        try:
+            obj = obj.values
+        except AttributeError:
+            # not pandas
+            return False
     for o in obj:
         if not is_string_like(o):
             return False
+    return True
+
+
+def is_hashable(obj):
+    """
+    Returns true if *obj* can be hashed
+    """
+    try:
+        hash(obj)
+    except TypeError:
+        return False
     return True
 
 
@@ -840,7 +864,7 @@ def flatten(seq, scalarp=is_scalar_or_string):
                 yield subitem
 
 
-class Sorter:
+class Sorter(object):
     """
     Sort by attribute or item
 
@@ -948,7 +972,7 @@ def soundex(name, len=4):
     return (sndx + (len * '0'))[:len]
 
 
-class Null:
+class Null(object):
     """ Null objects always and reliably "do nothing." """
 
     def __init__(self, *args, **kwargs):
@@ -987,21 +1011,18 @@ def mkdirs(newdir, mode=0o777):
         > mkdir -p NEWDIR
         > chmod MODE NEWDIR
     """
-    try:
-        if not os.path.exists(newdir):
-            parts = os.path.split(newdir)
-            for i in range(1, len(parts) + 1):
-                thispart = os.path.join(*parts[:i])
-                if not os.path.exists(thispart):
-                    os.makedirs(thispart, mode)
+    # this functionality is now in core python as of 3.2
+    # LPY DROP
+    if six.PY3:
+        os.makedirs(newdir, mode=mode, exist_ok=True)
+    else:
+        try:
+            os.makedirs(newdir, mode=mode)
+        except OSError as exception:
+            if exception.errno != errno.EEXIST:
+                raise
 
-    except OSError as err:
-        # Reraise the error unless it's about an already existing directory
-        if err.errno != errno.EEXIST or not os.path.isdir(newdir):
-            raise
-
-
-class GetRealpathAndStat:
+class GetRealpathAndStat(object):
     def __init__(self):
         self._cache = {}
 
@@ -1029,7 +1050,7 @@ def dict_delall(d, keys):
             pass
 
 
-class RingBuffer:
+class RingBuffer(object):
     """ class that implements a not-yet-full buffer """
     def __init__(self, size_max):
         self.max = size_max
@@ -1383,12 +1404,6 @@ class Stack(object):
                 self.push(thiso)
 
 
-def popall(seq):
-    'empty a list'
-    for i in xrange(len(seq)):
-        seq.pop()
-
-
 def finddir(o, match, case=False):
     """
     return all attributes of *o* which match string in match.  if case
@@ -1415,51 +1430,6 @@ def restrict_dict(d, keys):
     """
     return dict([(k, v) for (k, v) in six.iteritems(d) if k in keys])
 
-
-def report_memory(i=0):  # argument may go away
-    'return the memory consumed by process'
-    from matplotlib.compat.subprocess import Popen, PIPE
-    pid = os.getpid()
-    if sys.platform == 'sunos5':
-        try:
-            a2 = Popen('ps -p %d -o osz' % pid, shell=True,
-                       stdout=PIPE).stdout.readlines()
-        except OSError:
-            raise NotImplementedError(
-                "report_memory works on Sun OS only if "
-                "the 'ps' program is found")
-        mem = int(a2[-1].strip())
-    elif sys.platform.startswith('linux'):
-        try:
-            a2 = Popen('ps -p %d -o rss,sz' % pid, shell=True,
-                       stdout=PIPE).stdout.readlines()
-        except OSError:
-            raise NotImplementedError(
-                "report_memory works on Linux only if "
-                "the 'ps' program is found")
-        mem = int(a2[1].split()[1])
-    elif sys.platform.startswith('darwin'):
-        try:
-            a2 = Popen('ps -p %d -o rss,vsz' % pid, shell=True,
-                       stdout=PIPE).stdout.readlines()
-        except OSError:
-            raise NotImplementedError(
-                "report_memory works on Mac OS only if "
-                "the 'ps' program is found")
-        mem = int(a2[1].split()[0])
-    elif sys.platform.startswith('win'):
-        try:
-            a2 = Popen(["tasklist", "/nh", "/fi", "pid eq %d" % pid],
-                       stdout=PIPE).stdout.read()
-        except OSError:
-            raise NotImplementedError(
-                "report_memory works on Windows only if "
-                "the 'tasklist' program is found")
-        mem = int(a2.strip().split()[-2].replace(',', ''))
-    else:
-        raise NotImplementedError(
-            "We don't have a memory monitor for %s" % sys.platform)
-    return mem
 
 _safezip_msg = 'In safezip, len(args[0])=%d but len(args[%d])=%d'
 
@@ -1490,58 +1460,6 @@ def safe_masked_invalid(x):
     except TypeError:
         return x
     return xm
-
-
-class MemoryMonitor:
-    def __init__(self, nmax=20000):
-        self._nmax = nmax
-        self._mem = np.zeros((self._nmax,), np.int32)
-        self.clear()
-
-    def clear(self):
-        self._n = 0
-        self._overflow = False
-
-    def __call__(self):
-        mem = report_memory()
-        if self._n < self._nmax:
-            self._mem[self._n] = mem
-            self._n += 1
-        else:
-            self._overflow = True
-        return mem
-
-    def report(self, segments=4):
-        n = self._n
-        segments = min(n, segments)
-        dn = int(n / segments)
-        ii = list(xrange(0, n, dn))
-        ii[-1] = n - 1
-        print()
-        print('memory report: i, mem, dmem, dmem/nloops')
-        print(0, self._mem[0])
-        for i in range(1, len(ii)):
-            di = ii[i] - ii[i - 1]
-            if di == 0:
-                continue
-            dm = self._mem[ii[i]] - self._mem[ii[i - 1]]
-            print('%5d %5d %3d %8.3f' % (ii[i], self._mem[ii[i]],
-                                         dm, dm / float(di)))
-        if self._overflow:
-            print("Warning: array size was too small for the number of calls.")
-
-    def xy(self, i0=0, isub=1):
-        x = np.arange(i0, self._n, isub)
-        return x, self._mem[i0:self._n:isub]
-
-    def plot(self, i0=0, isub=1, fig=None):
-        if fig is None:
-            from .pylab import figure
-            fig = figure()
-
-        ax = fig.add_subplot(111)
-        ax.plot(*self.xy(i0, isub))
-        fig.canvas.draw()
 
 
 def print_cycles(objects, outstream=sys.stdout, show_progress=False):
@@ -1647,7 +1565,7 @@ class Grouper(object):
         False
 
     """
-    def __init__(self, init=[]):
+    def __init__(self, init=()):
         mapping = self._mapping = {}
         for x in init:
             mapping[ref(x)] = [ref(x)]
@@ -1699,6 +1617,14 @@ class Grouper(object):
         except KeyError:
             return False
 
+    def remove(self, a):
+        self.clean()
+
+        mapping = self._mapping
+        seta = mapping.pop(ref(a), None)
+        if seta is not None:
+            seta.remove(ref(a))
+
     def __iter__(self):
         """
         Iterate over each of the disjoint sets as a list.
@@ -1737,7 +1663,7 @@ def simple_linear_interpolation(a, steps):
     if steps == 1:
         return a
 
-    steps = np.floor(steps)
+    steps = int(np.floor(steps))
     new_length = ((len(a) - 1) * steps) + 1
     new_shape = list(a.shape)
     new_shape[0] = new_length
@@ -1747,7 +1673,6 @@ def simple_linear_interpolation(a, steps):
     a0 = a[0:-1]
     a1 = a[1:]
     delta = ((a1 - a0) / steps)
-    steps = int(steps)
     for i in range(1, steps):
         result[i::steps] = delta * i + a0
     result[steps::steps] = a1
@@ -1846,43 +1771,51 @@ def delete_masked_points(*args):
     return margs
 
 
-def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
-    '''
-    Returns list of dictionaries of staticists to be use to draw a series of
-    box and whisker plots. See the `Returns` section below to the required
-    keys of the dictionary. Users can skip this function and pass a user-
-    defined set of dictionaries to the new `axes.bxp` method instead of
-    relying on MPL to do the calcs.
+def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None,
+                  autorange=False):
+    """
+    Returns list of dictionaries of statistics used to draw a series
+    of box and whisker plots. The `Returns` section enumerates the
+    required keys of the dictionary. Users can skip this function and
+    pass a user-defined set of dictionaries to the new `axes.bxp` method
+    instead of relying on MPL to do the calculations.
 
     Parameters
     ----------
     X : array-like
-        Data that will be represented in the boxplots. Should have 2 or fewer
-        dimensions.
+        Data that will be represented in the boxplots. Should have 2 or
+        fewer dimensions.
 
     whis : float, string, or sequence (default = 1.5)
-        As a float, determines the reach of the whiskers past the first and
-        third quartiles (e.g., Q3 + whis*IQR, QR = interquartile range, Q3-Q1).
-        Beyond the whiskers, data are considered outliers and are plotted as
-        individual points. Set this to an unreasonably high value to force the
-        whiskers to show the min and max data. Alternatively, set this to an
-        ascending sequence of percentile (e.g., [5, 95]) to set the whiskers
-        at specific percentiles of the data. Finally, can  `whis` be the
-        string 'range' to force the whiskers to the min and max of the data.
-        In the edge case that the 25th and 75th percentiles are equivalent,
-        `whis` will be automatically set to 'range'
+        As a float, determines the reach of the whiskers past the first
+        and third quartiles (e.g., Q3 + whis*IQR, QR = interquartile
+        range, Q3-Q1). Beyond the whiskers, data are considered outliers
+        and are plotted as individual points. This can be set this to an
+        ascending sequence of percentile (e.g., [5, 95]) to set the
+        whiskers at specific percentiles of the data. Finally, `whis`
+        can be the string ``'range'`` to force the whiskers to the
+        minimum and maximum of the data. In the edge case that the 25th
+        and 75th percentiles are equivalent, `whis` can be automatically
+        set to ``'range'`` via the `autorange` option.
 
-    bootstrap : int or None (default)
-        Number of times the confidence intervals around the median should
-        be bootstrapped (percentile method).
+    bootstrap : int, optional
+        Number of times the confidence intervals around the median
+        should be bootstrapped (percentile method).
 
-    labels : sequence
-        Labels for each dataset. Length must be compatible with dimensions
-        of `X`
+    labels : array-like, optional
+        Labels for each dataset. Length must be compatible with
+        dimensions of `X`.
+
+    autorange : bool, optional (False)
+        When `True` and the data are distributed such that the  25th and
+        75th percentiles are equal, ``whis`` is set to ``'range'`` such
+        that the whisker ends are at the minimum and maximum of the
+        data.
 
     Returns
     -------
-    bxpstats : A list of dictionaries containing the results for each column
+    bxpstats : list of dict
+        A list of dictionaries containing the results for each column
         of data. Keys of each dictionary are the following:
 
         ========   ===================================
@@ -1890,11 +1823,11 @@ def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
         ========   ===================================
         label      tick label for the boxplot
         mean       arithemetic mean value
-        median     50th percentile
+        med        50th percentile
         q1         first quartile (25th percentile)
         q3         third quartile (75th percentile)
         cilo       lower notch around the median
-        ciho       upper notch around the median
+        cihi       upper notch around the median
         whislo     end of the lower whisker
         whishi     end of the upper whisker
         fliers     outliers
@@ -1902,16 +1835,18 @@ def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
 
     Notes
     -----
-    Non-bootstrapping approach to confidence interval uses Gaussian-based
-    asymptotic approximation:
+    Non-bootstrapping approach to confidence interval uses Gaussian-
+    based asymptotic approximation:
 
-    .. math:: \mathrm{med} \pm 1.57 \times \frac{\mathrm{iqr}}{\sqrt{N}}
+    .. math::
+
+        \mathrm{med} \pm 1.57 \\times \\frac{\mathrm{iqr}}{\sqrt{N}}
 
     General approach from:
     McGill, R., Tukey, J.W., and Larsen, W.A. (1978) "Variations of
-        Boxplots", The American Statistician, 32:12-16.
+    Boxplots", The American Statistician, 32:12-16.
 
-    '''
+    """
 
     def _bootstrap_median(data, N=5000):
         # determine 95% confidence intervals of the median
@@ -1948,14 +1883,40 @@ def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
 
     ncols = len(X)
     if labels is None:
-        labels = [str(i) for i in range(ncols)]
+        labels = repeat(None)
     elif len(labels) != ncols:
         raise ValueError("Dimensions of labels and X must be compatible")
 
+    input_whis = whis
     for ii, (x, label) in enumerate(zip(X, labels), start=0):
+
         # empty dict
         stats = {}
-        stats['label'] = label
+        if label is not None:
+            stats['label'] = label
+
+        # restore whis to the input values in case it got changed in the loop
+        whis = input_whis
+
+        # note tricksyness, append up here and then mutate below
+        bxpstats.append(stats)
+
+        # if empty, bail
+        if len(x) == 0:
+            stats['fliers'] = np.array([])
+            stats['mean'] = np.nan
+            stats['med'] = np.nan
+            stats['q1'] = np.nan
+            stats['q3'] = np.nan
+            stats['cilo'] = np.nan
+            stats['cihi'] = np.nan
+            stats['whislo'] = np.nan
+            stats['whishi'] = np.nan
+            stats['med'] = np.nan
+            continue
+
+        # up-convert to an array, just to be safe
+        x = np.asarray(x)
 
         # arithmetic mean
         stats['mean'] = np.mean(x)
@@ -1965,7 +1926,7 @@ def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
 
         # interquartile range
         stats['iqr'] = q3 - q1
-        if stats['iqr'] == 0:
+        if stats['iqr'] == 0 and autorange:
             whis = 'range'
 
         # conf. interval around median
@@ -2009,9 +1970,9 @@ def boxplot_stats(X, whis=1.5, bootstrap=None, labels=None):
             np.compress(x > stats['whishi'], x)
         ])
 
-        # add in teh remaining stats and append to final output
+        # add in the remaining stats
         stats['q1'], stats['med'], stats['q3'] = q1, med, q3
-        bxpstats.append(stats)
+
 
     return bxpstats
 
@@ -2073,7 +2034,10 @@ _linestyles = [('-', 'solid'),
                (':', 'dotted')]
 
 ls_mapper = dict(_linestyles)
-ls_mapper.update([(ls[1], ls[0]) for ls in _linestyles])
+# The ls_mapper maps short codes for line style to their full name used
+# by backends
+# The reverse mapper is for mapping full names to short ones
+ls_mapper_r = dict([(ls[1], ls[0]) for ls in _linestyles])
 
 
 def align_iterators(func, *iterables):
@@ -2136,6 +2100,21 @@ def is_math_text(s):
     return even_dollars
 
 
+def _check_1d(x):
+    '''
+    Converts a sequence of less than 1 dimension, to an array of 1
+    dimension; leaves everything else untouched.
+    '''
+    if not hasattr(x, 'shape') or len(x.shape) < 1:
+        return np.atleast_1d(x)
+    else:
+        try:
+            x[:, None]
+            return x
+        except (IndexError, TypeError):
+            return np.atleast_1d(x)
+
+
 def _reshape_2D(X):
     """
     Converts a non-empty list or an ndarray of two or fewer dimensions
@@ -2167,6 +2146,8 @@ def _reshape_2D(X):
 
     if not hasattr(X[0], '__len__'):
         X = [X]
+    else:
+        X = [np.ravel(x) for x in X]
 
     return X
 
@@ -2280,6 +2261,305 @@ class _InstanceMethodPickler(object):
         return getattr(self.parent_obj, self.instancemethod_name)
 
 
+def _step_validation(x, *args):
+    """
+    Helper function of `pts_to_*step` functions
+
+    This function does all of the normalization required to the
+    input and generate the template for output
+
+
+    """
+    args = tuple(np.asanyarray(y) for y in args)
+    x = np.asanyarray(x)
+    if x.ndim != 1:
+        raise ValueError("x must be 1 dimenional")
+    if len(args) == 0:
+        raise ValueError("At least one Y value must be passed")
+
+    return np.vstack((x, ) + args)
+
+
+def pts_to_prestep(x, *args):
+    """
+    Covert continuous line to pre-steps
+
+    Given a set of N points convert to 2 N -1 points
+    which when connected linearly give a step function
+    which changes values at the begining the intervals.
+
+    Parameters
+    ----------
+    x : array
+        The x location of the steps
+
+    y1, y2, ... : array
+        Any number of y arrays to be turned into steps.
+        All must be the same length as ``x``
+
+    Returns
+    -------
+    x, y1, y2, .. : array
+        The x and y values converted to steps in the same order
+        as the input.  If the input is length ``N``, each of these arrays
+        will be length ``2N + 1``
+
+
+    Examples
+    --------
+    >> x_s, y1_s, y2_s = pts_to_prestep(x, y1, y2)
+    """
+    # do normalization
+    vertices = _step_validation(x, *args)
+    # create the output array
+    steps = np.zeros((vertices.shape[0], 2 * len(x) - 1), np.float)
+    # do the to step conversion logic
+    steps[0, 0::2], steps[0, 1::2] = vertices[0, :], vertices[0, :-1]
+    steps[1:, 0::2], steps[1:, 1:-1:2] = vertices[1:, :], vertices[1:, 1:]
+    # convert 2D array back to tuple
+    return tuple(steps)
+
+
+def pts_to_poststep(x, *args):
+    """
+    Covert continuous line to pre-steps
+
+    Given a set of N points convert to 2 N -1 points
+    which when connected linearly give a step function
+    which changes values at the begining the intervals.
+
+    Parameters
+    ----------
+    x : array
+        The x location of the steps
+
+    y1, y2, ... : array
+        Any number of y arrays to be turned into steps.
+        All must be the same length as ``x``
+
+    Returns
+    -------
+    x, y1, y2, .. : array
+        The x and y values converted to steps in the same order
+        as the input.  If the input is length ``N``, each of these arrays
+        will be length ``2N + 1``
+
+
+    Examples
+    --------
+    >> x_s, y1_s, y2_s = pts_to_prestep(x, y1, y2)
+    """
+    # do normalization
+    vertices = _step_validation(x, *args)
+    # create the output array
+    steps = ma.zeros((vertices.shape[0], 2 * len(x) - 1), np.float)
+    # do the to step conversion logic
+    steps[0, ::2], steps[0, 1:-1:2] = vertices[0, :], vertices[0, 1:]
+    steps[1:, 0::2], steps[1:, 1::2] = vertices[1:, :], vertices[1:, :-1]
+
+    # convert 2D array back to tuple
+    return tuple(steps)
+
+
+def pts_to_midstep(x, *args):
+    """
+    Covert continuous line to pre-steps
+
+    Given a set of N points convert to 2 N -1 points
+    which when connected linearly give a step function
+    which changes values at the begining the intervals.
+
+    Parameters
+    ----------
+    x : array
+        The x location of the steps
+
+    y1, y2, ... : array
+        Any number of y arrays to be turned into steps.
+        All must be the same length as ``x``
+
+    Returns
+    -------
+    x, y1, y2, .. : array
+        The x and y values converted to steps in the same order
+        as the input.  If the input is length ``N``, each of these arrays
+        will be length ``2N + 1``
+
+
+    Examples
+    --------
+    >> x_s, y1_s, y2_s = pts_to_prestep(x, y1, y2)
+    """
+    # do normalization
+    vertices = _step_validation(x, *args)
+    # create the output array
+    steps = ma.zeros((vertices.shape[0], 2 * len(x)), np.float)
+    steps[0, 1:-1:2] = 0.5 * (vertices[0, :-1] + vertices[0, 1:])
+    steps[0, 2::2] = 0.5 * (vertices[0, :-1] + vertices[0, 1:])
+    steps[0, 0] = vertices[0, 0]
+    steps[0, -1] = vertices[0, -1]
+    steps[1:, 0::2], steps[1:, 1::2] = vertices[1:, :], vertices[1:, :]
+
+    # convert 2D array back to tuple
+    return tuple(steps)
+
+STEP_LOOKUP_MAP = {'pre': pts_to_prestep,
+                   'post': pts_to_poststep,
+                   'mid': pts_to_midstep,
+                   'step-pre': pts_to_prestep,
+                   'step-post': pts_to_poststep,
+                   'step-mid': pts_to_midstep}
+
+
+def index_of(y):
+    """
+    A helper function to get the index of an input to plot
+    against if x values are not explicitly given.
+
+    Tries to get `y.index` (works if this is a pd.Series), if that
+    fails, return np.arange(y.shape[0]).
+
+    This will be extended in the future to deal with more types of
+    labeled data.
+
+    Parameters
+    ----------
+    y : scalar or array-like
+        The proposed y-value
+
+    Returns
+    -------
+    x, y : ndarray
+       The x and y values to plot.
+    """
+    try:
+        return y.index.values, y.values
+    except AttributeError:
+        y = np.atleast_1d(y)
+        return np.arange(y.shape[0], dtype=float), y
+
+
+def safe_first_element(obj):
+    if isinstance(obj, collections.Iterator):
+        raise RuntimeError("matplotlib does not support generators "
+                           "as input")
+    return next(iter(obj))
+
+
+def normalize_kwargs(kw, alias_mapping=None, required=(), forbidden=(),
+                     allowed=None):
+    """Helper function to normalize kwarg inputs
+
+    The order they are resolved are:
+
+     1. aliasing
+     2. required
+     3. forbidden
+     4. allowed
+
+    This order means that only the canonical names need appear in
+    `allowed`, `forbidden`, `required`
+
+    Parameters
+    ----------
+
+    alias_mapping, dict, optional
+        A mapping between a canonical name to a list of
+        aliases, in order of precedence from lowest to highest.
+
+        If the canonical value is not in the list it is assumed to have
+        the highest priority.
+
+    required : iterable, optional
+        A tuple of fields that must be in kwargs.
+
+    forbidden : iterable, optional
+        A list of keys which may not be in kwargs
+
+    allowed : tuple, optional
+        A tuple of allowed fields.  If this not None, then raise if
+        `kw` contains any keys not in the union of `required`
+        and `allowed`.  To allow only the required fields pass in
+        ``()`` for `allowed`
+
+    Raises
+    ------
+    TypeError
+        To match what python raises if invalid args/kwargs are passed to
+        a callable.
+
+    """
+    # deal with default value of alias_mapping
+    if alias_mapping is None:
+        alias_mapping = dict()
+
+    # make a local so we can pop
+    kw = dict(kw)
+    # output dictionary
+    ret = dict()
+
+    # hit all alias mappings
+    for canonical, alias_list in six.iteritems(alias_mapping):
+
+        # the alias lists are ordered from lowest to highest priority
+        # so we know to use the last value in this list
+        tmp = []
+        seen = []
+        for a in alias_list:
+            try:
+                tmp.append(kw.pop(a))
+                seen.append(a)
+            except KeyError:
+                pass
+        # if canonical is not in the alias_list assume highest priority
+        if canonical not in alias_list:
+            try:
+                tmp.append(kw.pop(canonical))
+                seen.append(canonical)
+            except KeyError:
+                pass
+        # if we found anything in this set of aliases put it in the return
+        # dict
+        if tmp:
+            ret[canonical] = tmp[-1]
+            if len(tmp) > 1:
+                warnings.warn("Saw kwargs {seen!r} which are all aliases for "
+                              "{canon!r}.  Kept value from {used!r}".format(
+                                  seen=seen, canon=canonical, used=seen[-1]))
+
+    # at this point we know that all keys which are aliased are removed, update
+    # the return dictionary from the cleaned local copy of the input
+    ret.update(kw)
+
+    fail_keys = [k for k in required if k not in ret]
+    if fail_keys:
+        raise TypeError("The required keys {keys!r} "
+                        "are not in kwargs".format(keys=fail_keys))
+
+    fail_keys = [k for k in forbidden if k in ret]
+    if fail_keys:
+        raise TypeError("The forbidden keys {keys!r} "
+                        "are in kwargs".format(keys=fail_keys))
+
+    if allowed is not None:
+        allowed_set = set(required) | set(allowed)
+        fail_keys = [k for k in ret if k not in allowed_set]
+        if fail_keys:
+            raise TypeError("kwargs contains {keys!r} which are not in "
+                            "the required {req!r} or "
+                            "allowed {allow!r} keys".format(
+                                keys=fail_keys, req=required,
+                                allow=allowed))
+
+    return ret
+
+
+def get_label(y, default_name):
+    try:
+        return y.name
+    except AttributeError:
+        return default_name
+
 # Numpy > 1.6.x deprecates putmask in favor of the new copyto.
 # So long as we support versions 1.6.x and less, we need the
 # following local version of putmask.  We choose to make a
@@ -2296,3 +2576,63 @@ except AttributeError:
 else:
     def _putmask(a, mask, values):
         return np.copyto(a, values, where=mask)
+
+_lockstr = """\
+LOCKERROR: matplotlib is trying to acquire the lock {!r}
+and has failed.  This maybe due to any other process holding this
+lock.  If you are sure no other matplotlib process in running try
+removing this folder(s) and trying again.
+"""
+
+
+class Locked(object):
+    """
+    Context manager to handle locks.
+
+    Based on code from conda.
+
+    (c) 2012-2013 Continuum Analytics, Inc. / http://continuum.io
+    All Rights Reserved
+
+    conda is distributed under the terms of the BSD 3-clause license.
+    Consult LICENSE_CONDA or http://opensource.org/licenses/BSD-3-Clause.
+    """
+    LOCKFN = '.matplotlib_lock'
+
+    def __init__(self, path):
+        self.path = path
+        self.end = "-" + str(os.getpid())
+        self.lock_path = os.path.join(self.path, self.LOCKFN + self.end)
+        self.pattern = os.path.join(self.path, self.LOCKFN + '-*')
+        self.remove = True
+
+    def __enter__(self):
+        retries = 50
+        sleeptime = 1
+        while retries:
+            files = glob.glob(self.pattern)
+            if files and not files[0].endswith(self.end):
+                time.sleep(sleeptime)
+                sleeptime *= 1.1
+                retries -= 1
+            else:
+                break
+        else:
+            err_str = _lockstr.format(self.pattern)
+            raise RuntimeError(err_str)
+
+        if not files:
+            try:
+                os.makedirs(self.lock_path)
+            except OSError:
+                pass
+        else:  # PID lock already here --- someone else will remove it.
+            self.remove = False
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.remove:
+            for path in self.lock_path, self.path:
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass

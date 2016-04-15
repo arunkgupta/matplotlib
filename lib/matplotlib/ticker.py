@@ -26,7 +26,8 @@ formatter::
 
    ax.get_xaxis().get_major_formatter().set_useOffset(False)
 
-or set a different formatter.
+set the rcParam ``axes.formatter.useoffset=False`` to turn it off
+globally, or set a different formatter.
 
 Tick locating
 -------------
@@ -34,7 +35,7 @@ Tick locating
 The Locator class is the base class for all tick locators.  The locators
 handle autoscaling of the view limits based on the data limits, and the
 choosing of tick locations.  A useful semi-automatic tick locator is
-MultipleLocator.  You initialize this with a base, eg 10, and it picks axis
+MultipleLocator.  You initialize this with a base, e.g., 10, and it picks axis
 limits and ticks that are multiples of your base.
 
 The Locator subclasses defined here are
@@ -54,6 +55,10 @@ The Locator subclasses defined here are
 :class:`LogLocator`
     logarithmically ticks from min to max
 
+:class:`SymmetricalLogLocator`
+    locator for use with with the symlog norm, works like the `LogLocator` for
+    the part outside of the threshold and add 0 if inside the limits
+
 :class:`MultipleLocator`
     ticks and range are a multiple of base;
                   either integer or float
@@ -62,7 +67,7 @@ The Locator subclasses defined here are
     intelligent ticking during navigation
 
 :class:`MaxNLocator`
-    finds up to a max number of ticks at nice  locations
+    finds up to a max number of ticks at nice locations
 
 :class:`AutoLocator`
     :class:`MaxNLocator` with simple defaults. This is the default
@@ -92,7 +97,7 @@ methods are::
   ax.yaxis.set_major_locator( ymajorLocator )
   ax.yaxis.set_minor_locator( yminorLocator )
 
-The default minor locator is the NullLocator, eg no minor ticks on by
+The default minor locator is the NullLocator, e.g., no minor ticks on by
 default.
 
 Tick formatting
@@ -114,6 +119,9 @@ axis.
 :class:`FuncFormatter`
     user defined function sets the labels
 
+:class:`StrMethodFormatter`
+    Use string `format` method
+
 :class:`FormatStrFormatter`
     use a sprintf format string
 
@@ -123,6 +131,8 @@ axis.
 :class:`LogFormatter`
     formatter for log axes
 
+:class:`PercentFormatter`
+    Format labels as a percentage
 
 You can derive your own formatter from the Formatter base class by
 simply overriding the ``__call__`` method.  The formatter class has access
@@ -144,9 +154,7 @@ more information and examples of using date locators and formatters.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import six
-if six.PY3:
-    long = int
+from matplotlib.externals import six
 
 import decimal
 import locale
@@ -155,6 +163,46 @@ import numpy as np
 from matplotlib import rcParams
 from matplotlib import cbook
 from matplotlib import transforms as mtransforms
+from matplotlib.cbook import mplDeprecation
+
+import warnings
+
+
+__all__ = ('TickHelper', 'Formatter', 'FixedFormatter',
+           'NullFormatter', 'FuncFormatter', 'FormatStrFormatter',
+           'StrMethodFormatter', 'ScalarFormatter', 'LogFormatter',
+           'LogFormatterExponent', 'LogFormatterMathtext',
+           'LogitFormatter', 'EngFormatter', 'PercentFormatter',
+           'Locator', 'IndexLocator', 'FixedLocator', 'NullLocator',
+           'LinearLocator', 'LogLocator', 'AutoLocator',
+           'MultipleLocator', 'MaxNLocator', 'AutoMinorLocator',
+           'SymmetricalLogLocator')
+
+
+if six.PY3:
+    long = int
+
+
+# Work around numpy/numpy#6127.
+def _divmod(x, y):
+    if isinstance(x, np.generic):
+        x = x.item()
+    if isinstance(y, np.generic):
+        y = y.item()
+    return six.moves.builtins.divmod(x, y)
+
+
+def _mathdefault(s):
+    """
+    For backward compatibility, in classic mode we display
+    sub/superscripted text in a mathdefault block.  As of 2.0, the
+    math font already matches the default font, so we don't need to do
+    that anymore.
+    """
+    if rcParams['_internal.classic_mode']:
+        return '\\mathdefault{%s}' % s
+    else:
+        return '{%s}' % s
 
 
 class _DummyAxis(object):
@@ -177,6 +225,10 @@ class _DummyAxis(object):
 
     def set_data_interval(self, vmin, vmax):
         self.dataLim.intervalx = vmin, vmax
+
+    def get_tick_space(self):
+        # Just use the long-standing default of nbins==9
+        return 9
 
 
 class TickHelper(object):
@@ -298,6 +350,9 @@ class FixedFormatter(Formatter):
 class FuncFormatter(Formatter):
     """
     User defined function for formatting
+
+    The function should take in two inputs (tick value *x* and position *pos*)
+    and return a string
     """
     def __init__(self, func):
         self.func = func
@@ -460,7 +515,8 @@ class ScalarFormatter(Formatter):
         greater than 1e4.
         See also :meth:`set_scientific`.
         '''
-        assert len(lims) == 2, "argument must be a sequence of length 2"
+        if len(lims) != 2:
+            raise ValueError("'lims' must be a sequence of length 2")
         self._powerlimits = lims
 
     def format_data_short(self, value):
@@ -498,9 +554,8 @@ class ScalarFormatter(Formatter):
                     sciNotStr = '1e%d' % self.orderOfMagnitude
             if self._useMathText:
                 if sciNotStr != '':
-                    sciNotStr = r'\times\mathdefault{%s}' % sciNotStr
-                s = ''.join(('$', sciNotStr,
-                             r'\mathdefault{', offsetStr, '}$'))
+                    sciNotStr = r'\times%s' % _mathdefault(sciNotStr)
+                s = ''.join(('$', sciNotStr, _mathdefault(offsetStr), '$'))
             elif self._usetex:
                 if sciNotStr != '':
                     sciNotStr = r'\times%s' % sciNotStr
@@ -528,8 +583,11 @@ class ScalarFormatter(Formatter):
         if locs is None or not len(locs) or range == 0:
             self.offset = 0
             return
+        vmin, vmax = sorted(self.axis.get_view_interval())
+        locs = np.asarray(locs)
+        locs = locs[(vmin <= locs) & (locs <= vmax)]
         ave_loc = np.mean(locs)
-        if ave_loc:  # dont want to take log10(0)
+        if len(locs) and ave_loc:  # dont want to take log10(0)
             ave_oom = math.floor(math.log10(np.mean(np.absolute(locs))))
             range_oom = math.floor(math.log10(range))
 
@@ -577,6 +635,12 @@ class ScalarFormatter(Formatter):
             _locs = self.locs
         locs = (np.asarray(_locs) - self.offset) / 10. ** self.orderOfMagnitude
         loc_range = np.ptp(locs)
+        # Curvilinear coordinates can yield two identical points.
+        if loc_range == 0:
+            loc_range = np.max(np.abs(locs))
+        # Both points might be zero.
+        if loc_range == 0:
+            loc_range = 1
         if len(self.locs) < 2:
             # We needed the end points only for the loc_range calculation.
             locs = locs[:-2]
@@ -595,7 +659,7 @@ class ScalarFormatter(Formatter):
         if self._usetex:
             self.format = '$%s$' % self.format
         elif self._useMathText:
-            self.format = '$\mathdefault{%s}$' % self.format
+            self.format = '$%s$' % _mathdefault(self.format)
 
     def pprint_val(self, x):
         xp = (x - self.offset) / (10. ** self.orderOfMagnitude)
@@ -713,13 +777,15 @@ class LogFormatter(Formatter):
         else:
             fmt = '%1.3f'
         s = fmt % x
-        #print d, x, fmt, s
+
         tup = s.split('e')
         if len(tup) == 2:
             mantissa = tup[0].rstrip('0').rstrip('.')
-            sign = tup[1][0].replace('+', '')
-            exponent = tup[1][1:].lstrip('0')
-            s = '%se%s%s' % (mantissa, sign, exponent)
+            exponent = int(tup[1])
+            if exponent:
+                s = '%se%d' % (mantissa, exponent)
+            else:
+                s = mantissa
         else:
             s = s.rstrip('0').rstrip('.')
         return s
@@ -750,7 +816,8 @@ class LogFormatterExponent(LogFormatter):
         elif abs(fx) < 1:
             s = '%1.0g' % fx
         else:
-            s = self.pprint_val(fx, d)
+            fd = math.log(abs(d)) / math.log(b)
+            s = self.pprint_val(fx, fd)
         if sign == -1:
             s = '-%s' % s
 
@@ -772,7 +839,7 @@ class LogFormatterMathtext(LogFormatter):
             if usetex:
                 return '$0$'
             else:
-                return '$\mathdefault{0}$'
+                return '$%s$' % _mathdefault('0')
 
         fx = math.log(abs(x)) / math.log(b)
         is_decade = is_close_to_int(fx)
@@ -792,17 +859,41 @@ class LogFormatterMathtext(LogFormatter):
                 return (r'$%s%s^{%.2f}$') % \
                                             (sign_string, base, fx)
             else:
-                return ('$\mathdefault{%s%s^{%.2f}}$') % \
-                                            (sign_string, base, fx)
+                return ('$%s$' % _mathdefault(
+                    '%s%s^{%.2f}' %
+                    (sign_string, base, fx)))
         else:
             if usetex:
                 return (r'$%s%s^{%d}$') % (sign_string,
                                            base,
                                            nearest_long(fx))
             else:
-                return (r'$\mathdefault{%s%s^{%d}}$') % (sign_string,
-                                                         base,
-                                                         nearest_long(fx))
+                return ('$%s$' % _mathdefault(
+                    '%s%s^{%d}' %
+                    (sign_string, base, nearest_long(fx))))
+
+
+class LogitFormatter(Formatter):
+    '''Probability formatter (using Math text)'''
+    def __call__(self, x, pos=None):
+        s = ''
+        if 0.01 <= x <= 0.99:
+            s = '{:.2f}'.format(x)
+        elif x < 0.01:
+            if is_decade(x):
+                s = '$10^{{{:.0f}}}$'.format(np.log10(x))
+            else:
+                s = '${:.5f}$'.format(x)
+        else:  # x > 0.99
+            if is_decade(1-x):
+                s = '$1-10^{{{:.0f}}}$'.format(np.log10(1-x))
+            else:
+                s = '$1-{:.5f}$'.format(1-x)
+        return s
+
+    def format_data_short(self, value):
+        'return a short formatted string representation of a number'
+        return '%-12g' % value
 
 
 class EngFormatter(Formatter):
@@ -845,8 +936,10 @@ class EngFormatter(Formatter):
         return self.fix_minus(s)
 
     def format_eng(self, num):
-        """ Formats a number in engineering notation, appending a letter
-        representing the power of 1000 of the original number. Some examples:
+        """
+        Formats a number in engineering notation, appending a letter
+        representing the power of 1000 of the original number.
+        Some examples:
 
         >>> format_eng(0)       # for self.places = 0
         '0'
@@ -857,13 +950,9 @@ class EngFormatter(Formatter):
         >>> format_eng("-1e-6") # for self.places = 2
         u'-1.00 \u03bc'
 
-        @param num: the value to represent
-        @type num: either a numeric value or a string that can be converted to
-                   a numeric value (as per decimal.Decimal constructor)
-
-        @return: engineering formatted string
+        `num` may be a numeric value or a string that can be converted
+        to a numeric value with the `decimal.Decimal` constructor.
         """
-
         dnum = decimal.Decimal(str(num))
 
         sign = 1
@@ -894,6 +983,90 @@ class EngFormatter(Formatter):
         formatted = format_str % (mant, prefix)
 
         return formatted.strip()
+
+
+class PercentFormatter(Formatter):
+    """
+    Format numbers as a percentage.
+
+    How the number is converted into a percentage is determined by the
+    `xmax` parameter. `xmax` is the data value that corresponds to 100%.
+    Percentages are computed as ``x / xmax * 100``. So if the data is
+    already scaled to be percentages, `xmax` will be 100. Another common
+    situation is where `xmax` is 1.0.
+
+    `symbol` is a string which will be appended to the label. It may be
+    `None` or empty to indicate that no symbol should be used.
+
+    `decimals` is the number of decimal places to place after the point.
+    If it is set to `None` (the default), the number will be computed
+    automatically.
+    """
+    def __init__(self, xmax=100, decimals=None, symbol='%'):
+        self.xmax = xmax + 0.0
+        self.decimals = decimals
+        self.symbol = symbol
+
+    def __call__(self, x, pos=None):
+        """
+        Formats the tick as a percentage with the appropriate scaling.
+        """
+        ax_min, ax_max = self.axis.get_view_interval()
+        display_range = abs(ax_max - ax_min)
+
+        return self.fix_minus(self.format_pct(x, display_range))
+
+    def format_pct(self, x, display_range):
+        """
+        Formats the number as a percentage number with the correct
+        number of decimals and adds the percent symbol, if any.
+
+        If `self.decimals` is `None`, the number of digits after the
+        decimal point is set based on the `display_range` of the axis
+        as follows:
+
+        +---------------+----------+------------------------+
+        | display_range | decimals |          sample        |
+        +---------------+----------+------------------------+
+        | >50           |     0    | ``x = 34.5`` => 35%    |
+        +---------------+----------+------------------------+
+        | >5            |     1    | ``x = 34.5`` => 34.5%  |
+        +---------------+----------+------------------------+
+        | >0.5          |     2    | ``x = 34.5`` => 34.50% |
+        +---------------+----------+------------------------+
+        |      ...      |    ...   |          ...           |
+        +---------------+----------+------------------------+
+
+        This method will not be very good for tiny axis ranges or
+        extremely large ones. It assumes that the values on the chart
+        are percentages displayed on a reasonable scale.
+        """
+        x = self.convert_to_pct(x)
+        if self.decimals is None:
+            # conversion works because display_range is a difference
+            scaled_range = self.convert_to_pct(display_range)
+            if scaled_range <= 0:
+                decimals = 0
+            else:
+                # Luckily Python's built-in ceil rounds to +inf, not away from
+                # zero. This is very important since the equation for decimals
+                # starts out as `scaled_range > 0.5 * 10**(2 - decimals)`
+                # and ends up with `decimals > 2 - log10(2 * scaled_range)`.
+                decimals = math.ceil(2.0 - math.log10(2.0 * scaled_range))
+                if decimals > 5:
+                    decimals = 5
+                elif decimals < 0:
+                    decimals = 0
+        else:
+            decimals = self.decimals
+        s = '{x:0.{decimals}f}'.format(x=x, decimals=int(decimals))
+
+        if self.symbol:
+            return s + self.symbol
+        return s
+
+    def convert_to_pct(self, x):
+        return 100.0 * (x / self.xmax)
 
 
 class Locator(TickHelper):
@@ -927,6 +1100,14 @@ class Locator(TickHelper):
 
         """
         raise NotImplementedError('Derived must override')
+
+    def set_params(self, **kwargs):
+        """
+        Do nothing, and rase a warning. Any locator class not supporting the
+        set_params() function will call this.
+        """
+        warnings.warn("'set_params()' not defined for locator of type " +
+                      str(type(self)))
 
     def __call__(self):
         """Return the locations of the ticks"""
@@ -991,14 +1172,21 @@ class Locator(TickHelper):
 class IndexLocator(Locator):
     """
     Place a tick on every multiple of some base number of points
-    plotted, eg on every 5th point.  It is assumed that you are doing
-    index plotting; ie the axis is 0, len(data).  This is mainly
+    plotted, e.g., on every 5th point.  It is assumed that you are doing
+    index plotting; i.e., the axis is 0, len(data).  This is mainly
     useful for x ticks.
     """
     def __init__(self, base, offset):
         'place ticks on the i-th data points where (i-offset)%base==0'
         self._base = base
         self.offset = offset
+
+    def set_params(self, base=None, offset=None):
+        """Set parameters within this locator"""
+        if base is not None:
+            self._base = base
+        if offset is not None:
+            self.offset = offset
 
     def __call__(self):
         """Return the locations of the ticks"""
@@ -1026,6 +1214,11 @@ class FixedLocator(Locator):
         self.nbins = nbins
         if self.nbins is not None:
             self.nbins = max(self.nbins, 2)
+
+    def set_params(self, nbins=None):
+        """Set parameters within this locator."""
+        if nbins is not None:
+            self.nbins = nbins
 
     def __call__(self):
         return self.tick_values(None, None)
@@ -1091,6 +1284,13 @@ class LinearLocator(Locator):
         else:
             self.presets = presets
 
+    def set_params(self, numticks=None, presets=None):
+        """Set parameters within this locator."""
+        if presets is not None:
+            self.presets = presets
+        if numticks is not None:
+            self.numticks = numticks
+
     def __call__(self):
         'Return the locations of the ticks'
         vmin, vmax = self.axis.get_view_interval()
@@ -1126,13 +1326,13 @@ class LinearLocator(Locator):
             vmin -= 1
             vmax += 1
 
-        exponent, remainder = divmod(math.log10(vmax - vmin), 1)
-
-        if remainder < 0.5:
-            exponent -= 1
-        scale = 10 ** (-exponent)
-        vmin = math.floor(scale * vmin) / scale
-        vmax = math.ceil(scale * vmax) / scale
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            exponent, remainder = _divmod(math.log10(vmax - vmin), 1)
+            if remainder < 0.5:
+                exponent -= 1
+            scale = 10 ** (-exponent)
+            vmin = math.floor(scale * vmin) / scale
+            vmax = math.ceil(scale * vmax) / scale
 
         return mtransforms.nonsingular(vmin, vmax)
 
@@ -1144,22 +1344,23 @@ def closeto(x, y):
         return False
 
 
-class Base:
+class Base(object):
     'this solution has some hacks to deal with floating point inaccuracies'
     def __init__(self, base):
-        assert(base > 0)
+        if base <= 0:
+            raise ValueError("'base' must be positive")
         self._base = base
 
     def lt(self, x):
         'return the largest multiple of base < x'
-        d, m = divmod(x, self._base)
+        d, m = _divmod(x, self._base)
         if closeto(m, 0) and not closeto(m / self._base, 1):
             return (d - 1) * self._base
         return d * self._base
 
     def le(self, x):
         'return the largest multiple of base <= x'
-        d, m = divmod(x, self._base)
+        d, m = _divmod(x, self._base)
         if closeto(m / self._base, 1):  # was closeto(m, self._base)
             #looks like floating point error
             return (d + 1) * self._base
@@ -1167,7 +1368,7 @@ class Base:
 
     def gt(self, x):
         'return the smallest multiple of base > x'
-        d, m = divmod(x, self._base)
+        d, m = _divmod(x, self._base)
         if closeto(m / self._base, 1):
             #looks like floating point error
             return (d + 2) * self._base
@@ -1175,7 +1376,7 @@ class Base:
 
     def ge(self, x):
         'return the smallest multiple of base >= x'
-        d, m = divmod(x, self._base)
+        d, m = _divmod(x, self._base)
         if closeto(m, 0) and not closeto(m / self._base, 1):
             return d * self._base
         return (d + 1) * self._base
@@ -1192,6 +1393,11 @@ class MultipleLocator(Locator):
 
     def __init__(self, base=1.0):
         self._base = Base(base)
+
+    def set_params(self, base):
+        """Set parameters within this locator."""
+        if base is not None:
+            self._base = base
 
     def __call__(self):
         'Return the locations of the ticks'
@@ -1212,33 +1418,27 @@ class MultipleLocator(Locator):
         Set the view limits to the nearest multiples of base that
         contain the data
         """
-        vmin = self._base.le(dmin)
-        vmax = self._base.ge(dmax)
-        if vmin == vmax:
-            vmin -= 1
-            vmax += 1
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            vmin = self._base.le(dmin)
+            vmax = self._base.ge(dmax)
+            if vmin == vmax:
+                vmin -= 1
+                vmax += 1
+        else:
+            vmin = dmin
+            vmax = dmax
 
         return mtransforms.nonsingular(vmin, vmax)
 
 
 def scale_range(vmin, vmax, n=1, threshold=100):
-    dv = abs(vmax - vmin)
-    if dv == 0:     # maxabsv == 0 is a special case of this.
-        return 1.0, 0.0
-        # Note: this should never occur because
-        # vmin, vmax should have been checked by nonsingular(),
-        # and spread apart if necessary.
-    meanv = 0.5 * (vmax + vmin)
+    dv = abs(vmax - vmin)  # > 0 as nonsingular is called before.
+    meanv = (vmax + vmin) / 2
     if abs(meanv) / dv < threshold:
         offset = 0
-    elif meanv > 0:
-        ex = divmod(math.log10(meanv), 1)[0]
-        offset = 10 ** ex
     else:
-        ex = divmod(math.log10(-meanv), 1)[0]
-        offset = -10 ** ex
-    ex = divmod(math.log10(dv / n), 1)[0]
-    scale = 10 ** ex
+        offset = math.copysign(10 ** (math.log10(abs(meanv)) // 1), meanv)
+    scale = 10 ** (math.log10(dv / n) // 1)
     return scale, offset
 
 
@@ -1248,7 +1448,6 @@ class MaxNLocator(Locator):
     """
     default_params = dict(nbins=10,
                           steps=None,
-                          trim=True,
                           integer=False,
                           symmetric=False,
                           prune=None)
@@ -1258,7 +1457,9 @@ class MaxNLocator(Locator):
         Keyword args:
 
         *nbins*
-            Maximum number of intervals; one less than max number of ticks.
+            Maximum number of intervals; one less than max number of
+            ticks.  If the string `'auto'`, the number of bins will be
+            automatically determined based on the length of the axis.
 
         *steps*
             Sequence of nice numbers starting with 1 and ending with 10;
@@ -1282,9 +1483,6 @@ class MaxNLocator(Locator):
             will be removed.  If prune==None, no ticks will be removed.
 
         """
-        # I left "trim" out; it defaults to True, and it is not
-        # clear that there is any use case for False, so we may
-        # want to remove that kwarg.  EF 2010/04/18
         if args:
             kwargs['nbins'] = args[0]
             if len(args) > 1:
@@ -1294,10 +1492,15 @@ class MaxNLocator(Locator):
         self.set_params(**kwargs)
 
     def set_params(self, **kwargs):
+        """Set parameters within this locator."""
         if 'nbins' in kwargs:
-            self._nbins = int(kwargs['nbins'])
+            self._nbins = kwargs['nbins']
+            if self._nbins != 'auto':
+                self._nbins = int(self._nbins)
         if 'trim' in kwargs:
-            self._trim = kwargs['trim']
+            warnings.warn(
+                "The 'trim' keyword has no effect since version 2.0.",
+                mplDeprecation)
         if 'integer' in kwargs:
             self._integer = kwargs['integer']
         if 'symmetric' in kwargs:
@@ -1320,10 +1523,12 @@ class MaxNLocator(Locator):
         if 'integer' in kwargs:
             self._integer = kwargs['integer']
         if self._integer:
-            self._steps = [n for n in self._steps if divmod(n, 1)[1] < 0.001]
+            self._steps = [n for n in self._steps if _divmod(n, 1)[1] < 0.001]
 
-    def bin_boundaries(self, vmin, vmax):
+    def _raw_ticks(self, vmin, vmax):
         nbins = self._nbins
+        if nbins == 'auto':
+            nbins = max(min(self.axis.get_tick_space(), 9), 1)
         scale, offset = scale_range(vmin, vmax, nbins)
         if self._integer:
             scale = max(1, scale)
@@ -1338,23 +1543,30 @@ class MaxNLocator(Locator):
             if step < scaled_raw_step:
                 continue
             step *= scale
-            best_vmin = step * divmod(vmin, step)[0]
+            best_vmin = vmin // step * step
             best_vmax = best_vmin + step * nbins
-            if (best_vmax >= vmax):
+            if best_vmax >= vmax:
                 break
-        if self._trim:
-            extra_bins = int(divmod((best_vmax - vmax), step)[0])
-            nbins -= extra_bins
-        return (np.arange(nbins + 1) * step + best_vmin + offset)
+
+        # More than nbins may be required, e.g. vmin, vmax = -4.1, 4.1 gives
+        # nbins=9 but 10 bins are actually required after rounding.  So we just
+        # create the bins that span the range we need instead.
+        low = round(Base(step).le(vmin - best_vmin) / step)
+        high = round(Base(step).ge(vmax - best_vmin) / step)
+        return np.arange(low, high + 1) * step + best_vmin + offset
+
+    @cbook.deprecated("2.0")
+    def bin_boundaries(self, vmin, vmax):
+        return self._raw_ticks(vmin, vmax)
 
     def __call__(self):
         vmin, vmax = self.axis.get_view_interval()
         return self.tick_values(vmin, vmax)
 
     def tick_values(self, vmin, vmax):
-        vmin, vmax = mtransforms.nonsingular(vmin, vmax, expander=1e-13,
-                                                         tiny=1e-14)
-        locs = self.bin_boundaries(vmin, vmax)
+        vmin, vmax = mtransforms.nonsingular(
+            vmin, vmax, expander=1e-13, tiny=1e-14)
+        locs = self._raw_ticks(vmin, vmax)
         prune = self._prune
         if prune == 'lower':
             locs = locs[1:]
@@ -1365,13 +1577,19 @@ class MaxNLocator(Locator):
         return self.raise_if_exceeds(locs)
 
     def view_limits(self, dmin, dmax):
-        if self._symmetric:
-            maxabs = max(abs(dmin), abs(dmax))
-            dmin = -maxabs
-            dmax = maxabs
-        dmin, dmax = mtransforms.nonsingular(dmin, dmax, expander=1e-12,
-                                                        tiny=1.e-13)
-        return np.take(self.bin_boundaries(dmin, dmax), [0, -1])
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            if self._symmetric:
+                maxabs = max(abs(dmin), abs(dmax))
+                dmin = -maxabs
+                dmax = maxabs
+
+        dmin, dmax = mtransforms.nonsingular(
+            dmin, dmax, expander=1e-12, tiny=1e-13)
+
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            return self._raw_ticks(dmin, dmax)[[0, -1]]
+        else:
+            return dmin, dmax
 
 
 def decade_down(x, base=10):
@@ -1427,6 +1645,17 @@ class LogLocator(Locator):
         self.subs(subs)
         self.numticks = numticks
         self.numdecs = numdecs
+
+    def set_params(self, base=None, subs=None, numdecs=None, numticks=None):
+        """Set parameters within this locator."""
+        if base is not None:
+            self.base = base
+        if subs is not None:
+            self.subs = subs
+        if numdecs is not None:
+            self.numdecs = numdecs
+        if numticks is not None:
+            self.numticks = numticks
 
     def base(self, base):
         """
@@ -1527,14 +1756,16 @@ class LogLocator(Locator):
         if vmin <= minpos:
             vmin = minpos
 
-        if not is_decade(vmin, self._base):
-            vmin = decade_down(vmin, self._base)
-        if not is_decade(vmax, self._base):
-            vmax = decade_up(vmax, self._base)
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            if not is_decade(vmin, self._base):
+                vmin = decade_down(vmin, self._base)
+            if not is_decade(vmax, self._base):
+                vmax = decade_up(vmax, self._base)
 
-        if vmin == vmax:
-            vmin = decade_down(vmin, self._base)
-            vmax = decade_up(vmax, self._base)
+            if vmin == vmax:
+                vmin = decade_down(vmin, self._base)
+                vmax = decade_up(vmax, self._base)
+
         result = mtransforms.nonsingular(vmin, vmax)
         return result
 
@@ -1554,6 +1785,13 @@ class SymmetricalLogLocator(Locator):
         else:
             self._subs = subs
         self.numticks = 15
+
+    def set_params(self, subs=None, numticks=None):
+        """Set parameters within this locator."""
+        if numticks is not None:
+            self.numticks = numticks
+        if subs is not None:
+            self._subs = subs
 
     def __call__(self):
         'Return the locations of the ticks'
@@ -1670,31 +1908,124 @@ class SymmetricalLogLocator(Locator):
         if vmax < vmin:
             vmin, vmax = vmax, vmin
 
-        if not is_decade(abs(vmin), b):
-            if vmin < 0:
-                vmin = -decade_up(-vmin, b)
-            else:
-                vmin = decade_down(vmin, b)
-        if not is_decade(abs(vmax), b):
-            if vmax < 0:
-                vmax = -decade_down(-vmax, b)
-            else:
-                vmax = decade_up(vmax, b)
+        if rcParams['axes.autolimit_mode'] == 'round_numbers':
+            if not is_decade(abs(vmin), b):
+                if vmin < 0:
+                    vmin = -decade_up(-vmin, b)
+                else:
+                    vmin = decade_down(vmin, b)
+            if not is_decade(abs(vmax), b):
+                if vmax < 0:
+                    vmax = -decade_down(-vmax, b)
+                else:
+                    vmax = decade_up(vmax, b)
 
-        if vmin == vmax:
-            if vmin < 0:
-                vmin = -decade_up(-vmin, b)
-                vmax = -decade_down(-vmax, b)
-            else:
-                vmin = decade_down(vmin, b)
-                vmax = decade_up(vmax, b)
+            if vmin == vmax:
+                if vmin < 0:
+                    vmin = -decade_up(-vmin, b)
+                    vmax = -decade_down(-vmax, b)
+                else:
+                    vmin = decade_down(vmin, b)
+                    vmax = decade_up(vmax, b)
+
         result = mtransforms.nonsingular(vmin, vmax)
         return result
 
 
+class LogitLocator(Locator):
+    """
+    Determine the tick locations for logit axes
+    """
+
+    def __init__(self, minor=False):
+        """
+        place ticks on the logit locations
+        """
+        self.minor = minor
+
+    def set_params(self, minor=None):
+        """Set parameters within this locator."""
+        if minor is not None:
+            self.minor = minor
+
+    def __call__(self):
+        'Return the locations of the ticks'
+        vmin, vmax = self.axis.get_view_interval()
+        return self.tick_values(vmin, vmax)
+
+    def tick_values(self, vmin, vmax):
+        # dummy axis has no axes attribute
+        if hasattr(self.axis, 'axes') and self.axis.axes.name == 'polar':
+            raise NotImplementedError('Polar axis cannot be logit scaled yet')
+
+        # what to do if a window beyond ]0, 1[ is chosen
+        if vmin <= 0.0:
+            if self.axis is not None:
+                vmin = self.axis.get_minpos()
+
+            if (vmin <= 0.0) or (not np.isfinite(vmin)):
+                raise ValueError(
+                    "Data has no values in ]0, 1[ and therefore can not be "
+                    "logit-scaled.")
+
+        # NOTE: for vmax, we should query a property similar to get_minpos, but
+        # related to the maximal, less-than-one data point. Unfortunately,
+        # get_minpos is defined very deep in the BBox and updated with data,
+        # so for now we use the trick below.
+        if vmax >= 1.0:
+            if self.axis is not None:
+                vmax = 1 - self.axis.get_minpos()
+
+            if (vmax >= 1.0) or (not np.isfinite(vmax)):
+                raise ValueError(
+                    "Data has no values in ]0, 1[ and therefore can not be "
+                    "logit-scaled.")
+
+        if vmax < vmin:
+            vmin, vmax = vmax, vmin
+
+        vmin = np.log10(vmin / (1 - vmin))
+        vmax = np.log10(vmax / (1 - vmax))
+
+        decade_min = np.floor(vmin)
+        decade_max = np.ceil(vmax)
+
+        # major ticks
+        if not self.minor:
+            ticklocs = []
+            if (decade_min <= -1):
+                expo = np.arange(decade_min, min(0, decade_max + 1))
+                ticklocs.extend(list(10**expo))
+            if (decade_min <= 0) and (decade_max >= 0):
+                ticklocs.append(0.5)
+            if (decade_max >= 1):
+                expo = -np.arange(max(1, decade_min), decade_max + 1)
+                ticklocs.extend(list(1 - 10**expo))
+
+        # minor ticks
+        else:
+            ticklocs = []
+            if (decade_min <= -2):
+                expo = np.arange(decade_min, min(-1, decade_max))
+                newticks = np.outer(np.arange(2, 10), 10**expo).ravel()
+                ticklocs.extend(list(newticks))
+            if (decade_min <= 0) and (decade_max >= 0):
+                ticklocs.extend([0.2, 0.3, 0.4, 0.6, 0.7, 0.8])
+            if (decade_max >= 2):
+                expo = -np.arange(max(2, decade_min), decade_max + 1)
+                newticks = 1 - np.outer(np.arange(2, 10), 10**expo).ravel()
+                ticklocs.extend(list(newticks))
+
+        return self.raise_if_exceeds(np.array(ticklocs))
+
+
 class AutoLocator(MaxNLocator):
     def __init__(self):
-        MaxNLocator.__init__(self, nbins=9, steps=[1, 2, 5, 10])
+        if rcParams['_internal.classic_mode']:
+            nbins = 9
+        else:
+            nbins = 'auto'
+        MaxNLocator.__init__(self, nbins=nbins, steps=[1, 2, 5, 10])
 
 
 class AutoMinorLocator(Locator):
@@ -1730,7 +2061,7 @@ class AutoMinorLocator(Locator):
                 # TODO: Need a better way to figure out ndivs
                 ndivs = 1
             else:
-                x = int(round(10 ** (np.log10(majorstep) % 1)))
+                x = int(np.round(10 ** (np.log10(majorstep) % 1)))
                 if x in [1, 5, 10]:
                     ndivs = 5
                 else:
@@ -1746,8 +2077,8 @@ class AutoMinorLocator(Locator):
 
         if len(majorlocs) > 0:
             t0 = majorlocs[0]
-            tmin = np.ceil((vmin - t0) / minorstep) * minorstep
-            tmax = np.floor((vmax - t0) / minorstep) * minorstep
+            tmin = ((vmin - t0) // minorstep + 1) * minorstep
+            tmax = ((vmax - t0) // minorstep + 1) * minorstep
             locs = np.arange(tmin, tmax, minorstep) + t0
             cond = np.abs((locs - t0) % majorstep) > minorstep / 10.0
             locs = locs.compress(cond)
@@ -1820,12 +2151,3 @@ class OldAutoLocator(Locator):
             locator = MultipleLocator(ticksize)
 
         return locator
-
-
-__all__ = ('TickHelper', 'Formatter', 'FixedFormatter',
-           'NullFormatter', 'FuncFormatter', 'FormatStrFormatter',
-           'ScalarFormatter', 'LogFormatter', 'LogFormatterExponent',
-           'LogFormatterMathtext', 'Locator', 'IndexLocator',
-           'FixedLocator', 'NullLocator', 'LinearLocator',
-           'LogLocator', 'AutoLocator', 'MultipleLocator',
-           'MaxNLocator', 'AutoMinorLocator',)
